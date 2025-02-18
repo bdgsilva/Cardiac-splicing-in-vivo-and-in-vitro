@@ -1,0 +1,2329 @@
+---
+title: "Splicing_iPSC-CM_vs_Heart"
+author: "Beatriz Gomes-Silva"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library("rmarkdown")
+knitr::opts_knit$set(root.dir = "~/Documents/GitHub/Cardiac-splicing-in-vivo-and-in-vitro/")  # set working directory
+
+```
+
+```{r import info}
+library("tidyverse")
+
+# import metadata
+coldata <- read.table("data/coldata_input_splicing.csv", header = TRUE, row.names = 1, sep = ";") 
+order_samples <- rownames(coldata)
+
+# import protein coding genes
+protein_coding_id <- read.table("data/protein_coding_genes_id.txt")$V1
+
+```
+
+```{r import PSIs}
+library("org.Hs.eg.db")
+
+### rMATS ####
+rmats_sample_order <- c("iPSC_1", "iPSC_2", "iPSC_3", "Lab_1", "Lab_2", "Lab_3", "MDC_1", "MDC_2", "MDC_3", "Fetal_ERR2598052", "Fetal_ERR2598053", "Fetal_ERR2598054", "Fetal_ERR2598055", "Fetal_ERR2598073", "Fetal_ERR2598074", "Fetal_ERR2598075", "Fetal_ERR2598076", "Fetal_ERR2598090", "Fetal_ERR2598091", "Fetal_ERR2598105", "Fetal_ERR2598106", "Fetal_ERR2598107", "Fetal_ERR2598108", "Fetal_ERR2598122", "Fetal_ERR2598123", "Fetal_ERR2598124", "Fetal_ERR2598138", "Fetal_ERR2598153", "Fetal_ERR2598154", "Fetal_ERR2598155", "Fetal_ERR2598167", "Fetal_ERR2598168", "Fetal_ERR2598182", "Fetal_ERR2598183", "Fetal_ERR2598193", "Fetal_ERR2598194", "Fetal_ERR2598209", "Fetal_ERR2598210", "Fetal_ERR2598211", "Fetal_ERR2598230", "Fetal_ERR2598231", "Fetal_ERR2598232", "Fetal_ERR2598233", "Fetal_ERR2598234", "Fetal_ERR2598253", "Fetal_ERR2598254", "Fetal_ERR2598255","Adult_ERR2598270", "Adult_ERR2598289", "Adult_ERR2598290", "Adult_ERR2598291", "Adult_ERR2598292", "Adult_ERR2598307", "Adult_ERR2598315", "Adult_ERR2598316", "Adult_ERR2598317", "Adult_ERR2598338", "Adult_ERR2598339", "Adult_ERR2598351")
+
+process_rmats_psi <- function(psi_df, min_reads){
+  coverage_pass_Lab <- psi_df %>% 
+    dplyr::select("event_id", "IJC_SAMPLE_1", "SJC_SAMPLE_1") %>% 
+    separate(., col = IJC_SAMPLE_1, into = paste("IJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    separate(., col = SJC_SAMPLE_1, into = paste("SJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    mutate_at(vars(contains("Lab")), ~ ifelse(. == "NA", NA, as.numeric(.))) %>%
+    filter(rowSums(dplyr::select(., contains("IJC_Lab")) >= min_reads) >= ncol(dplyr::select(., contains("IJC_Lab"))) |
+           rowSums(dplyr::select(., contains("SJC_Lab")) >= min_reads) >= ncol(dplyr::select(., contains("SJC_Lab")))) %>%
+    pull("event_id")
+
+  coverage_pass_Fetal <- psi_df %>% 
+    dplyr::select("event_id", "IJC_SAMPLE_1", "SJC_SAMPLE_1") %>% 
+    separate(., col = IJC_SAMPLE_1, into = paste("IJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    separate(., col = SJC_SAMPLE_1, into = paste("SJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    mutate_at(vars(contains("Fetal")), ~ ifelse(. == "NA", NA, as.numeric(.))) %>%
+    filter(rowSums(dplyr::select(., contains("IJC_Fetal")) >= min_reads) >= ncol(dplyr::select(., contains("IJC_Fetal"))) / 2 |
+           rowSums(dplyr::select(., contains("SJC_Fetal")) >= min_reads) >= ncol(dplyr::select(., contains("SJC_Fetal"))) / 2) %>%
+    pull("event_id")
+
+  coverage_pass_Adult <- psi_df %>% 
+    dplyr::select("event_id", "IJC_SAMPLE_1", "SJC_SAMPLE_1") %>% 
+    separate(., col = IJC_SAMPLE_1, into = paste("IJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    separate(., col = SJC_SAMPLE_1, into = paste("SJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    mutate_at(vars(contains("Adult")), ~ ifelse(. == "NA", NA, as.numeric(.))) %>%
+    filter(rowSums(dplyr::select(., contains("IJC_Adult")) >= min_reads) >= ncol(dplyr::select(., contains("IJC_Adult"))) / 2 |
+           rowSums(dplyr::select(., contains("SJC_Adult")) >= min_reads) >= ncol(dplyr::select(., contains("SJC_Adult"))) / 2) %>%
+    pull("event_id")
+
+  # combine the event_ids that pass the conditions for at least two groups
+  coverage_pass_combined <- c(intersect(coverage_pass_Lab, coverage_pass_Fetal), 
+                              intersect(coverage_pass_Lab, coverage_pass_Adult), 
+                              intersect(coverage_pass_Fetal, coverage_pass_Adult))
+
+  processed_psi <- psi_df %>% 
+    dplyr::select("event_id", "GeneID", "IncLevel1") %>% 
+    mutate(GeneID = gsub("\\..*", "", GeneID)) %>%    
+    filter(event_id %in% coverage_pass_combined & GeneID %in% protein_coding_id) %>%     
+    separate(., col = IncLevel1, into = rmats_sample_order, sep = ",") %>%
+    dplyr::select(all_of(c("event_id", "GeneID", rmats_sample_order))) %>%
+    mutate_all(~ ifelse(. == "NA", NA, .))
+  return(processed_psi)
+}
+
+psi_rmats_SE <- read.table("data/psi/SE.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  mutate(event_id = paste(chr, ":", strand,":", exonStart_0base + 1, "-", exonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = "")) %>% 
+  process_rmats_psi(., 10)
+
+psi_rmats_RI <- read.table("data/psi/RI.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  mutate(event_id = paste(chr, ":", strand, ":", riExonStart_0base + 1, "-", riExonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = "")) %>% 
+  process_rmats_psi(., 10)
+
+psi_rmats_A5SS <- read.table("data/psi/A5SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  mutate(event_id = paste(chr, ":", strand, ":", longExonStart_0base + 1, "-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = "")) %>% 
+  process_rmats_psi(., 10)
+
+psi_rmats_A3SS <- read.table("data/psi/A3SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  mutate(event_id = paste(chr, ":", strand, ":", longExonStart_0base + 1, "-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = "")) %>% 
+  process_rmats_psi(., 10)
+
+# merge PSI of different event types
+rmats_event_gene <- rbind(psi_rmats_SE, psi_rmats_RI, psi_rmats_A5SS, psi_rmats_A3SS) %>% 
+  dplyr::select(event_id, GeneID) %>% 
+  rename("GeneID" = "gene_id")
+
+psi_rmats_all <- rbind(psi_rmats_SE, psi_rmats_RI, psi_rmats_A5SS, psi_rmats_A3SS) %>% 
+  column_to_rownames(., var = "event_id") %>% 
+  dplyr::select(-GeneID) %>%
+  dplyr::select(all_of(order_samples)) %>% 
+  dplyr::select(-contains("iPSC")) %>%
+  mutate_all(as.numeric) %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Lab")))) < 1 &
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 3 &  ## remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Adult")))) <= ncol(dplyr::select(., contains("Adult"))) / 3) 
+
+write.table(psi_rmats_all, "results/splicing/psi_rmats_all.tsv", row.names = T, sep = "\t", quote = F)
+
+
+## MAJIQ ####
+
+# PSI were calculated with --decomplexify-psi-threshold. Filter out junctions where PSI is below a certain value. If multiple input files are used, only the highest PSI value is used.
+### this will include duplicated junctions (source and target) for the same event - caution for what is used for 
+# https://biociphers.bitbucket.io/majiq-docs-academic/modulizer/event-types.html#cassette 
+
+psi_majiq_SE <- read.table("data/psi/cassette.tsv", header = T, sep= "\t") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>%     # spliced_with - filter for junctions that support the inclusion of the cassette exon ("C1_A", "C2_A")
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+psi_majiq_RI <- read.table("data/psi/alternative_intron.tsv", header = T, sep = "\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name == "C2_C1_intron") %>%   # filter for junctions that support the retention of the intron 
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+psi_majiq_A3SS <- read.table("data/psi/alt3prime.tsv", header = T, sep = "\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal") %>%     # filter for junctions that support the 3'ss exon shortening
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "" ,gene_id)) %>% 
+  ungroup()
+
+psi_majiq_A5SS <- read.table("data/psi/alt5prime.tsv", header = T, sep = "\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal") %>%    # filter for junctions that support the 5'ss exon shortening
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+# extract correspondence event - gene
+majiq_event_gene <- rbind(psi_majiq_SE, psi_majiq_RI, psi_majiq_A3SS, psi_majiq_A5SS) %>% 
+  mutate(event_id = paste(event_id, "_", lsv_id)) %>% 
+  dplyr::select("event_id", "gene_id") 
+
+# merge PSI of different event types
+psi_majiq_all <- rbind(psi_majiq_SE, psi_majiq_RI, psi_majiq_A3SS, psi_majiq_A5SS) %>% 
+  dplyr::select(., -contains("iPSC")) %>% 
+  filter(gene_id %in% protein_coding_id) %>%  # filter for events in protein coding genes
+  mutate(event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::select(., -c("lsv_id", "gene_id")) %>% 
+  column_to_rownames(.,var = "event_id") %>% 
+  rename_with(~ gsub("_median_psi", "", .)) %>% 
+  dplyr::select(all_of(rownames(coldata))) %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Lab")))) < 1 &
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 3 &   # remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Adult")))) <= ncol(dplyr::select(., contains("Adult"))) / 3) 
+
+write.table(psi_majiq_all, "results/splicing/psi_majiq_all.tsv", row.names = T, sep = "\t", quote = F)
+
+
+## vast-tools ####
+vast_events_coords <- read.table("data/vast_events_coords.tsv", header = T, sep = "\t") %>% # import additional info about VastDB events 
+  filter(GeneID %in% protein_coding_id)
+psi_vastools_all <- read.table("data/psi/INCLUSION_LEVELS_FULL_TIDY.tsv", header = T, row.names = 1)
+psi_vastools_tidy <- read.table("data/psi/INCLUSION_LEVELS_TIDY_Fr05_SD5_noVLOW.tsv", header = T, row.names = 1) # import events that passed filtering with tidy - 50% of prenatal and postnatal samples have enough coverage. only 2 groups can be used for filtering, the heart samples were chosen because their coverage is much lower than that of iPSC-CMs
+psi_vastools_all <- psi_vastools_all[rownames(psi_vastools_all) %in% rownames(psi_vastools_tidy), ] # subset total events, including iPSC-CMs,to those that passed tidy filtering 
+psi_vastools_all <- psi_vastools_all[rownames(psi_vastools_all) %in% vast_events_coords$EVENT, ] 
+psi_vastools_all <- psi_vastools_all/100    # make PSI between 0 and 1
+psi_vastools_all <- psi_vastools_all %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Lab")))) < 1 &
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 3 &  ## remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Adult")))) <= ncol(dplyr::select(., contains("Adult"))) / 3) %>% 
+  dplyr::select(., -contains("iPSC")) %>% 
+  dplyr::select(all_of(rownames(coldata))) 
+
+write.table(psi_vastools_all, "results/splicing/psi_vastools_all.tsv", row.names = T, sep = "\t", quote = F)
+
+# extract correspondence event - gene
+vast_event_gene <- vast_events_coords %>% 
+  dplyr::rename(gene_id = GeneID, event_id = EVENT) %>% 
+  dplyr::select("event_id", "gene_id") %>% 
+  filter(event_id %in% rownames(psi_vastools_all))
+
+## merge PSI of different tools ####
+psi_all_tools <- rbind(psi_rmats_all, psi_majiq_all, psi_vastools_all)
+# write.table(psi_all_tools, "results/splicing/psi_all_tools.tsv", row.names = T, sep = "\t", quote = F)
+
+## merge correspondence event - gene
+event_gene <- rbind(rmats_event_gene, majiq_event_gene, vast_event_gene)
+write.table(event_gene, "results/splicing/event_gene.tsv", row.names = T, sep = "\t", quote = F)
+  
+```
+
+```{r correlation}
+library("corrplot")
+library("cowplot")
+
+# create metadata
+coldata_corr <- data.frame(c("iPSC_D", "iPSC_G", "iPSC_T", "ERR2598167", "ERR2598168"), 
+                      type = c("iPSC-CM", "iPSC-CM", "iPSC-CM", "Heart_4w", "Heart_4w"), 
+                      sex= c("M" ,"M", "F", "F", "M"), 
+                      row.names = 1)
+
+# filter samples of interest
+corr_psi <- psi_rmats_all[, c("Lab_1", "Lab_2", "Lab_3", "Fetal_ERR2598167","Fetal_ERR2598168")]
+
+# remove constitutive events
+corr_psi <- corr_psi[complete.cases(corr_psi), ] # removes events with missing values
+corr_psi <-  corr_psi[rowSums(corr_psi >= 0.05) >= 1, ] # keep rows where at least one sample has PSI >= 0.05
+corr_psi <- corr_psi[round(rowSums(corr_psi)) < ncol(corr_psi), ] # removes events where the three samples have PSI=1
+
+# merge TPM/gene with PSI/event
+tpm <- read.table("results/gene_expression/tpm.tsv", sep = "\t", header = T) %>% 
+  dplyr::select("iPSC_D", "iPSC_G", "iPSC_T", "ERR2598167","ERR2598168") %>% 
+  rownames_to_column("gene_id")
+
+# merge TPM/gene with PSI/event
+psi_tpm <- corr_psi %>% 
+  rownames_to_column(., "event_id") %>% 
+  left_join(., event_gene, by = "event_id") %>% 
+  left_join(., tpm, by = "gene_id") 
+colnames(psi_tpm) <- c("event_id", "psi_Lab_1", "psi_Lab_2", "psi_Lab_3", "psi_ERR2598167", "psi_ERR2598168", "gene_id", "tpm_Lab_1", "tpm_Lab_2", "tpm_Lab_3", "tpm_ERR2598167", "tpm_ERR2598168")
+
+# keep genes with TPM > 10 in at least 1 sample (where PSI variances stabilizes)
+tpm <- tpm %>% column_to_rownames("gene_id")
+tpm10_genes <- rownames(tpm[(rowSums(tpm) >= 10) >= 1, ])
+corr_psi <- psi_tpm[psi_tpm$gene_id %in% tpm10_genes, ]
+corr_psi <- corr_psi %>% 
+  remove_rownames() %>% 
+  column_to_rownames(., var = "event_id") %>% 
+  dplyr::select(contains("psi"))
+
+# prevent events with PSI=0 or PSI=1 to become -/+inf when logit transformed
+corr_psi[corr_psi == 0] <- corr_psi[corr_psi == 0] + 0.01   # add 0.01 to values that are 0
+corr_psi[corr_psi == 1] <- corr_psi[corr_psi == 1] - 0.01   # subtract 0.01 from values that are 1
+
+# logit transformation
+logit <- logit(corr_psi)
+
+png("results/splicing/iPSC/spearman_corr.png", width = 9, height = 6, units = "in", res = 300)
+corrplot(round(cor(logit), 2), 
+         method = "circle", 
+         tl.col = "black", 
+         tl.srt = 45,
+         col = "grey",
+         addCoef.col = "black", 
+         cl.pos = "n",
+         order = "FPC", 
+         type = "upper")
+dev.off()
+
+```
+
+
+```{r PCA}
+
+plot_pca_splicing <- function(df, n_events, pc_1st, pc_2nd, variable_color, variable_shape, filename) {
+  
+  psi_pca <- df %>% mutate_all(as.numeric)
+
+  # matrix with imputation with mean of event
+  psi_pca <- t(apply(psi_pca, 1, function(x)        # t makes the column mean become row mean   
+  replace(x, is.na(x), mean(x, na.rm = TRUE))))     # NAs replaced for mean of event  
+
+  # select 500 most variable events
+  pca <<- prcomp(t(psi_pca[(order((apply(psi_pca, 1, var)), decreasing = TRUE)[1:n_events]), ]), center = TRUE, scale = FALSE)
+  percentVar <- pca$sdev^2 / sum(pca$sdev^2 )
+  pca_matrix <- as.data.frame(pca$x) %>% 
+    mutate(Age = coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull(Groups),
+           Age = factor(Age, levels = unique(Age)),
+           Stage = coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull(Stage),
+           Stage = factor(Stage, levels = unique(Stage)))
+
+  pca_plot <- ggplot(pca_matrix, 
+                     aes_string(x = paste0("PC", pc_1st), y = paste0("PC", pc_2nd), color = variable_color, fill = variable_color, shape = variable_shape)) + 
+    geom_point(size = 5, alpha = 0.9) + 
+    xlab(paste0("PC", pc_1st, ": ", round(percentVar[pc_1st] * 100), "% variance")) +
+    ylab(paste0("PC", pc_2nd, ": ", round(percentVar[pc_2nd] * 100), "% variance")) +
+    coord_fixed() + 
+    scale_color_manual(values = c(c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724"))) +
+    scale_fill_manual(values = c(c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724"))) +
+    theme(legend.title=element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          axis.title.x = element_text(color="black", size=14), 
+          axis.title.y = element_text(color="black", size=14), 
+          axis.text.x = element_text(size=12), 
+          axis.text.y = element_text(size=12)) + 
+  scale_shape_manual(values = c(16, 25, 24))
+    
+  ggsave(pca_plot, filename = paste0(pc_1st, "_", pc_2nd, "_", filename, ".pdf"), 
+         path = "results/splicing/pca", 
+         width = 6, height = 4, units = "in")
+  
+  return(pca_plot)
+}
+
+plot_pca_splicing(df = psi_rmats_all %>% dplyr::select(-contains("MDC")), n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "rmats_all")
+plot_pca_splicing(df = psi_majiq_all  %>% dplyr::select(-contains("MDC")), n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "majiq_all")
+plot_pca_splicing(df = psi_vastools_all  %>% dplyr::select(-contains("MDC")) , n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "vast_all")
+
+
+### CIBERSORTx - proportions
+prop_cui <- read.table("data/cibersortx/CIBERSORTx_Adjusted_Cui.txt", sep = "\t", header = T, row.names = 1)  %>% 
+  dplyr::select(-c("P.value", "Correlation", "RMSE")) 
+colnames(prop_cui)
+colnames(prop_cui) <- c("CM", "CM_5w", "Macrophage", "Endothelial", "Fibroblast_like", "Valvar_cell", "B/T_cell", "Mast_cell", "Epicardial")
+prop_cui <- prop_cui %>% 
+  mutate(CM_all = CM_5w + CM)
+
+# plot PCA of cell proportions
+pca_plot_cibersort <- function(df, n_events, pc_1st, pc_2nd, prop, filename) {
+  psi_pca <- df %>%
+  mutate_all(as.numeric)
+
+  # matrix with imputation with mean of event
+  psi_pca <- t(apply(psi_pca, 1, function(x)        # t makes the column mean become row mean   
+  replace(x, is.na(x), mean(x, na.rm = TRUE))))     # NAs replaced for mean of event  
+
+  # select 500 most variable events
+  pca <<- prcomp(t(psi_pca[(order((apply(psi_pca, 1, var)), decreasing = TRUE)[1:n_events]), ]), center = TRUE, scale = FALSE)
+  percentVar <- pca$sdev^2 / sum(pca$sdev^2 )
+  pca_matrix <- as.data.frame(pca$x) %>% 
+    mutate(Age = coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull(Groups),
+           Age = factor(Age, levels = unique(Age)),
+           Stage = coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull(Stage),
+           Stage = factor(Stage, levels = unique(Stage)),
+           cm_all_cui = prop_cui$CM_all,
+           cm_cui = prop_cui$CM,
+           cm_5w_cui = prop_cui$CM_5w,
+           fb_cui = prop_cui$`Fibroblast-like`)
+
+  pca_plot <- ggplot(pca_matrix, 
+                     aes_string(x = paste0("PC", pc_1st), y = paste0("PC", pc_2nd), color = prop, fill = prop, shape = "Stage")) + 
+    geom_point(size = 5, alpha = 0.9) + 
+    xlab(paste0("PC", pc_1st, ": ", round(percentVar[pc_1st] * 100), "% variance")) +
+    ylab(paste0("PC", pc_2nd, ": ", round(percentVar[pc_2nd] * 100), "% variance")) +
+    coord_fixed() + 
+    scale_colour_gradient(low = "white", high = "red") +
+    scale_fill_gradient(low = "white", high = "red") +
+    theme(legend.title = element_blank(),
+          legend.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          axis.title.x = element_text(color="black", size=14), 
+          axis.title.y = element_text(color="black", size=14), 
+          axis.text.x = element_text(size=12), 
+          axis.text.y = element_text(size=12)) + 
+  scale_shape_manual(values = c(16, 25, 24))
+    
+  ggsave(pca_plot, filename = paste0(pc_1st, "_", pc_2nd, "_", filename, ".pdf"), 
+         path = "results/splicing/pca", 
+         width = 6, height = 4, units = "in")
+  
+  return(pca_plot)
+}
+
+pca_plot_cibersort(df = psi_rmats_all %>% dplyr::select(-contains("MDC")), n_events = 500, pc_1st = 1, pc_2nd = 2, prop = "cm_all_cui", filename = "rmats_CM_all_Cui")
+pca_plot_cibersort(df = psi_majiq_all %>% dplyr::select(-contains("MDC")), n_events = 500, pc_1st = 1, pc_2nd = 2, prop = "cm_all_cui", filename = "majiq_CM_all_Cui")
+pca_plot_cibersort(df = psi_vastools_all %>% dplyr::select(-contains("MDC")), n_events = 500, pc_1st = 1, pc_2nd = 2, prop = "cm_all_cui", filename = "vast_CM_all_Cui")
+
+```
+
+```{r import deltaPSIs}
+
+## rMATS ####
+
+### exon skipping ###
+
+process_rmats_dpsi_se <- function(dpsi_df, group){
+  dpsi_df <- dpsi_df %>% 
+    mutate(GeneID = gsub("\\..*", "", GeneID),
+           event_id = paste(chr, ":", strand, ":", exonStart_0base + 1, "-", exonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = ""),
+           group = group) %>%
+    filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+    filter(event_id %in% rownames(psi_rmats_all)) %>% 
+    dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "exonStart_0base", "exonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "IncLevelDifference", "group") %>%
+    mutate(exonStart_0base = paste(exonStart_0base + 1, sep = ""),
+           upstreamES = paste(upstreamES + 1, sep = ""),
+           downstreamES = paste(downstreamES + 1, sep = ""),
+           spanning_coord = paste(chr, ":", upstreamES, "-", downstreamEE, sep = ""),
+           target_coord = paste(chr, ":", exonStart_0base, "-", exonEnd, sep = ""),
+           event_type = "ES",
+           protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+    dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "protein_coding", "event_type", "IncLevelDifference", "target_coord","spanning_coord","chr", "strand", "exonStart_0base", "exonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "group", "event_type", "protein_coding") %>% 
+    dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_start" = "exonStart_0base", "target_end" = "exonEnd", "upstream_start" = "upstreamES", "upstream_end" = "upstreamEE", "downstream_start" = "downstreamES", "downstream_end" = "downstreamEE") %>% 
+    remove_rownames()
+}
+
+# read in the rMATS data and process the delta PSI tables
+rmats_Fet_vs_Ad_SE <- read.table("data/deltapsi/prenatal_postnatal/SE.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_se(., "prenatal_postnatal") %>% 
+  mutate(deltaPSI = -1 * deltaPSI)
+
+rmats_CM_vs_Ad_SE <- read.table("data/deltapsi/cm_postnatal/SE.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_se(group = "cm_postnatal")
+
+rmats_CM_vs_Fet_SE <- read.table("data/deltapsi/cm_prenatal/SE.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_se(group = "cm_prenatal")
+
+
+### intron retention ###
+
+  process_rmats_dpsi_ri <- function(dpsi_df, group){
+    dpsi_df <- dpsi_df %>% 
+      mutate(GeneID = gsub("\\..*", "", GeneID),
+             event_id = paste(chr, ":", strand,":" , riExonStart_0base + 1, "-", riExonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = ""),
+             event_type = "RI",
+             group = group) %>%
+      filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+      filter(event_id %in% rownames(psi_rmats_all))  %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "riExonStart_0base", "riExonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "IncLevelDifference", "event_type", "group") %>% 
+      mutate(riExonStart_0base = paste(riExonStart_0base + 1, sep = ""),
+             upstreamES = paste(upstreamES + 1, sep = ""),
+             downstreamES = paste(downstreamES + 1, sep = ""),
+             spanning_coord = paste(chr, ":", upstreamES, "-", downstreamEE, sep = ""),
+             target_coord = paste(chr, ":", upstreamEE + 1 , "-", as.numeric(downstreamES) - 1, sep = ""),
+             protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "event_type", "IncLevelDifference", "target_coord","spanning_coord","chr", "strand","riExonStart_0base", "riExonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "protein_coding", "group") %>% 
+      dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_start" = "riExonStart_0base", "target_end" = "riExonEnd", "upstream_start" = "upstreamES", "upstream_end" = "upstreamEE", "downstream_start" = "downstreamES", "downstream_end" = "downstreamEE") %>% 
+      remove_rownames()
+  }
+
+# read in the rMATS data and process the deltaPSI tables
+rmats_Fet_vs_Ad_RI <- read.table("data/deltapsi/prenatal_postnatal/RI.MATS.JC.txt", header=T, sep="\t") %>% 
+  process_rmats_dpsi_ri(group = "prenatal_postnatal") %>% 
+  mutate(deltaPSI = -1 * deltaPSI) # invert sign to agree with the direction of the other comparison (G1-G2)
+
+rmats_CM_vs_Ad_RI <- read.table("data/deltapsi/cm_postnatal/RI.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ri(group = "cm_postnatal")
+
+rmats_CM_vs_Fet_RI <- read.table("data/deltapsi/cm_prenatal/RI.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ri(group = "cm_prenatal")
+
+
+### alternative splice sites ###
+
+  process_rmats_dpsi_ass <- function(dpsi_df, group, event_type){
+    dpsi_df <- dpsi_df %>% 
+      mutate(GeneID = gsub("\\..*", "", GeneID),
+             event_id = paste(chr, ":", strand, ":", longExonStart_0base + 1, "-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = ""),
+             group = group,
+             event_type = event_type) %>%
+      filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+      filter(event_id %in% rownames(psi_rmats_all)) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "longExonStart_0base", "longExonEnd", "shortES", "shortEE", "flankingES", "flankingEE", "event_type", "IncLevelDifference", "group") %>% 
+      mutate(longExonStart_0base = paste(longExonStart_0base + 1, sep = ""),
+             shortES = paste(shortES + 1, sep = ""),
+             spanning_coord = paste(chr, ":", longExonStart_0base, "-", longExonEnd, sep = ""),
+             target_coord = paste(chr, ":", shortES, "-", shortEE, sep = ""),
+             protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "IncLevelDifference", "target_coord","spanning_coord", "chr", "strand", "longExonStart_0base", "longExonEnd", "shortES", "shortEE", "event_type", "protein_coding", "group") %>% 
+      dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_long_start" = "longExonStart_0base", "target_long_end" = "longExonEnd", "target_short_start" = "shortES", "target_short_end" = "shortEE") %>% 
+      remove_rownames()
+  }
+
+# read in the rMATS data and process the A3SS deltaPSI tables
+rmats_Fet_vs_Ad_A3SS <- read.table("data/deltapsi/prenatal_postnatal/A3SS.MATS.JC.txt", header=T, sep="\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A3SS", group = "prenatal_postnatal") %>% 
+  mutate(deltaPSI = -1 * deltaPSI)
+
+rmats_CM_vs_Ad_A3SS <- read.table("data/deltapsi/cm_postnatal/A3SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A3SS", group = "cm_postnatal")
+
+rmats_CM_vs_Fet_A3SS <- read.table("data/deltapsi/cm_prenatal/A3SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A3SS", group = "cm_prenatal")
+
+
+# read in the rMATS data and process the A5SS deltaPSI tables
+rmats_Fet_vs_Ad_A5SS <- read.table("data/deltapsi/prenatal_postnatal/A5SS.MATS.JC.txt", header=T, sep="\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A5SS", group = "prenatal_postnatal") %>% 
+  mutate(deltaPSI = -1 * deltaPSI)
+
+rmats_CM_vs_Ad_A5SS <- read.table("data/deltapsi/cm_postnatal/A5SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A5SS", group = "cm_postnatal")
+
+rmats_CM_vs_Fet_A5SS <- read.table("data/deltapsi/cm_prenatal/A5SS.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A5SS", group = "cm_prenatal")
+
+
+### join all rMATS results ###
+sig_rmats <- rbind(rmats_Fet_vs_Ad_SE %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding", "group"), 
+                   rmats_CM_vs_Ad_SE %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_CM_vs_Fet_SE %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_Fet_vs_Ad_RI %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"), 
+                   rmats_CM_vs_Ad_RI %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_CM_vs_Fet_RI %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_Fet_vs_Ad_A3SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"), 
+                   rmats_CM_vs_Ad_A3SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_CM_vs_Fet_A3SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_Fet_vs_Ad_A5SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"), 
+                   rmats_CM_vs_Ad_A5SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group"),
+                   rmats_CM_vs_Fet_A5SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding","group")) %>% 
+  mutate(tool = "rmats") %>% 
+  remove_rownames()
+
+write.table(sig_rmats, "results/splicing/differential_splicing/all_sig_rmats.tsv", row.names = F, sep = "\t", quote = F)
+
+
+## MAJIQ ####
+# deltaPSI >= |0.2| and wilcoxon <= 0.01
+
+## exon skipping
+# fetal - adult 
+sig_majiq_se_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, spliced_with_coord, junction_name, reference_exon_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(reference_exon_coord)) %>% 
+  dplyr::rename("chr" = "seqid", "target_coord" = "spliced_with_coord", "C1_coord" = "C1_A", "C2_coord" = "C2_A") %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         C1_1 = as.numeric(str_extract(C1_coord, "[0-9]+(?=-)")),
+         C1_2 = as.numeric(str_extract(C1_coord, "(?<=-)[0-9]+")),
+         C2_1 = as.numeric(str_extract(C2_coord, "[0-9]+(?=-)")),
+         C2_2 = as.numeric(str_extract(C2_coord, "(?<=-)[0-9]+")),
+         target_1 = as.numeric(str_extract(target_coord, "[0-9]+(?=-)")),
+         target_2 = as.numeric(str_extract(target_coord, "(?<=-)[0-9]+")),
+         event_type = "ES") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                 paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+  target_coord = paste(chr, ":", target_coord, sep = ""),
+  target_start = paste(target_1, sep = ""),
+  target_end = paste(target_2, sep = ""),
+  upstream_start = ifelse(strand == "+", paste(C1_1, sep = ""),
+                                 paste(C2_1, sep = "")),
+  upstream_end = ifelse(strand == "+", paste(C1_2, sep = ""),
+                                 paste(C2_2, sep = "")),
+  downstream_start = ifelse(strand == "+", paste(C2_1, sep = ""),
+                                 paste(C1_1, sep = "")),
+  downstream_end = ifelse(strand == "+", paste(C2_2, sep = ""),
+                                 paste(C1_2, sep = ""))) %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end) 
+
+sig_majiq_se_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A" & `Fetal-Adult_het_wilcoxon` <= 0.01) %>% 
+  group_by(event_id) %>%
+  slice_max(abs(`Fetal-Adult_het_median_dpsi`)) %>%
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_se_fet_ad, by = "event_id") %>% 
+  mutate(group = "prenatal_postnatal",
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>%
+  filter(abs(`Fetal-Adult_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Fetal-Adult_het_median_dpsi") 
+
+         
+# ipsc - adult 
+sig_majiq_se_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, spliced_with_coord, junction_name, reference_exon_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(reference_exon_coord)) %>% 
+  dplyr::rename("chr" = "seqid", "target_coord" = "spliced_with_coord", "C1_coord" = "C1_A", "C2_coord" = "C2_A") %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         C1_1 = as.numeric(str_extract(C1_coord, "[0-9]+(?=-)")),
+         C1_2 = as.numeric(str_extract(C1_coord, "(?<=-)[0-9]+")),
+         C2_1 = as.numeric(str_extract(C2_coord, "[0-9]+(?=-)")),
+         C2_2 = as.numeric(str_extract(C2_coord, "(?<=-)[0-9]+")),
+         target_1 = as.numeric(str_extract(target_coord, "[0-9]+(?=-)")),
+         target_2 = as.numeric(str_extract(target_coord, "(?<=-)[0-9]+")),
+         event_type = "ES") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                 paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+  target_coord = paste(chr, ":", target_coord, sep = ""),
+  target_start = paste(target_1, sep = ""),
+  target_end = paste(target_2, sep = ""),
+  upstream_start = ifelse(strand == "+", paste(C1_1, sep = ""),
+                                 paste(C2_1, sep = "")),
+  upstream_end = ifelse(strand == "+", paste(C1_2, sep = ""),
+                                 paste(C2_2, sep = "")),
+  downstream_start = ifelse(strand == "+", paste(C2_1, sep = ""),
+                                 paste(C1_1, sep = "")),
+  downstream_end = ifelse(strand == "+", paste(C2_2, sep = ""),
+                                 paste(C1_2, sep = ""))) %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end) 
+         
+sig_majiq_se_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A" & `iPSC_iMM-Adult_het_wilcoxon` <= 0.01) %>% 
+  group_by(event_id) %>%
+  slice_max(abs(`iPSC_iMM-Adult_het_median_dpsi`)) %>%
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_se_cm_ad, by = "event_id") %>% 
+  mutate(group = "cm_postnatal",
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>%
+  filter(abs(`iPSC_iMM-Adult_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Adult_het_median_dpsi")
+
+
+# ipsc - fetal 
+sig_majiq_se_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, spliced_with_coord, junction_name, reference_exon_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(reference_exon_coord)) %>% 
+  dplyr::rename("chr" = "seqid", "target_coord" = "spliced_with_coord", "C1_coord" = "C1_A", "C2_coord" = "C2_A") %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         C1_1 = as.numeric(str_extract(C1_coord, "[0-9]+(?=-)")),
+         C1_2 = as.numeric(str_extract(C1_coord, "(?<=-)[0-9]+")),
+         C2_1 = as.numeric(str_extract(C2_coord, "[0-9]+(?=-)")),
+         C2_2 = as.numeric(str_extract(C2_coord, "(?<=-)[0-9]+")),
+         target_1 = as.numeric(str_extract(target_coord, "[0-9]+(?=-)")),
+         target_2 = as.numeric(str_extract(target_coord, "(?<=-)[0-9]+")),
+         event_type = "ES") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                 paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+  target_coord = paste(chr, ":", target_coord, sep = ""),
+  target_start = paste(target_1, sep = ""),
+  target_end = paste(target_2, sep = ""),
+  upstream_start = ifelse(strand == "+", paste(C1_1, sep = ""),
+                                 paste(C2_1, sep = "")),
+  upstream_end = ifelse(strand == "+", paste(C1_2, sep = ""),
+                                 paste(C2_2, sep = "")),
+  downstream_start = ifelse(strand == "+", paste(C2_1, sep = ""),
+                                 paste(C1_1, sep = "")),
+  downstream_end = ifelse(strand == "+", paste(C2_2, sep = ""),
+                                 paste(C1_2, sep = ""))) %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end) 
+
+sig_majiq_se_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A" & `iPSC_iMM-Fetal_het_wilcoxon` <= 0.01) %>% 
+  group_by(event_id) %>%
+  slice_max(abs(`iPSC_iMM-Fetal_het_median_dpsi`)) %>%
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_se_cm_fet, by = "event_id") %>% 
+  mutate(group = "cm_prenatal",
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>%
+  filter(abs(`iPSC_iMM-Fetal_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Fetal_het_median_dpsi")
+
+
+## intron retention
+# fetal - adult 
+
+sig_majiq_ri_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/alternative_intron.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name =="C2_C1_intron" & `Fetal-Adult_het_wilcoxon` <= 0.01 & abs(`Fetal-Adult_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, lsv_id, event_id, reference_exon_coord, spliced_with, spliced_with_coord, junction_name,junction_coord, `Fetal-Adult_het_median_dpsi`) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         junct_1 = as.numeric(str_extract(junction_coord, "[0-9]+(?=-)")),
+         junct_2 = as.numeric(str_extract(junction_coord, "(?<=-)[0-9]+")),
+         event_type = "RI",
+         group = "prenatal_postnatal") %>%   
+  mutate(spanning_coord = ifelse(strand == "+" & spliced_with == "C2", paste(seqid, ":", ref_1, "-", with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                        paste(seqid, ":", ref_1, "-", with_2, sep = "")))),
+         junction_coord = paste(seqid, ":", reference_exon_coord, sep = ""),
+         upstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_1, sep = ""),
+                                        paste(ref_1, sep = "")))),
+         upstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_2, sep = ""),
+                                        paste(ref_2, sep = "")))),
+         downstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_1, sep = ""),
+                                        paste(with_1, sep = "")))),
+         downstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_2, sep = ""),
+                                        paste(with_2, sep = "")))),
+         target_start = paste(as.numeric(upstream_end) + 1, sep = ""),
+         target_end = paste(as.numeric(downstream_start) -1, sep = ""),
+         target_coord = paste(seqid, ":", target_start, "-", target_end, sep = ""),
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::rename("deltaPSI" = "Fetal-Adult_het_median_dpsi", "chr" = "seqid") %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, deltaPSI, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end, group) 
+
+# ipsc - adult 
+
+sig_majiq_ri_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/alternative_intron.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name =="C2_C1_intron" & `iPSC_iMM-Adult_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Adult_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, lsv_id, event_id, reference_exon_coord, spliced_with, spliced_with_coord, junction_name,junction_coord, `iPSC_iMM-Adult_het_median_dpsi`) %>%
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         junct_1 = as.numeric(str_extract(junction_coord, "[0-9]+(?=-)")),
+         junct_2 = as.numeric(str_extract(junction_coord, "(?<=-)[0-9]+")),
+         event_type = "RI",
+         group = "cm_postnatal") %>%   
+  mutate(spanning_coord = ifelse(strand == "+" & spliced_with == "C2", paste(seqid, ":", ref_1, "-", with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                        paste(seqid, ":", ref_1, "-", with_2, sep = "")))),
+         junction_coord = paste(seqid, ":", reference_exon_coord, sep = ""),
+         upstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_1, sep = ""),
+                                        paste(ref_1, sep = "")))),
+         upstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_2, sep = ""),
+                                        paste(ref_2, sep = "")))),
+         downstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_1, sep = ""),
+                                        paste(with_1, sep = "")))),
+         downstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_2, sep = ""),
+                                        paste(with_2, sep = "")))),
+         target_start = paste(as.numeric(upstream_end) + 1, sep = ""),
+         target_end = paste(as.numeric(downstream_start) -1, sep = ""),
+         target_coord = paste(seqid, ":", target_start, "-", target_end, sep = ""),
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Adult_het_median_dpsi", "chr" = "seqid") %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, deltaPSI, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end, group) 
+
+# ipsc - fetal 
+
+sig_majiq_ri_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/alternative_intron.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name =="C2_C1_intron" & `iPSC_iMM-Fetal_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Fetal_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, lsv_id, event_id, reference_exon_coord, spliced_with, spliced_with_coord, junction_name,junction_coord, `iPSC_iMM-Fetal_het_median_dpsi`) %>%
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         junct_1 = as.numeric(str_extract(junction_coord, "[0-9]+(?=-)")),
+         junct_2 = as.numeric(str_extract(junction_coord, "(?<=-)[0-9]+")),
+         event_type = "RI",
+         group = "cm_prenatal") %>%   
+  mutate(spanning_coord = ifelse(strand == "+" & spliced_with == "C2", paste(seqid, ":", ref_1, "-", with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                        paste(seqid, ":", ref_1, "-", with_2, sep = "")))),
+         junction_coord = paste(seqid, ":", reference_exon_coord, sep = ""),
+         upstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_1, sep = ""),
+                                        paste(ref_1, sep = "")))),
+         upstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_2, sep = ""),
+                                        paste(ref_2, sep = "")))),
+         downstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_1, sep = ""),
+                                        paste(with_1, sep = "")))),
+         downstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_2, sep = ""),
+                                        paste(with_2, sep = "")))),
+         target_start = paste(as.numeric(upstream_end) + 1, sep = ""),
+         target_end = paste(as.numeric(downstream_start) -1, sep = ""),
+         target_coord = paste(seqid, ":", target_start, "-", target_end, sep = ""),
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Fetal_het_median_dpsi", "chr" = "seqid") %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, deltaPSI, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end, group)
+
+
+## alternative 3' prime 
+# fetal - adult 
+
+sig_majiq_a3ss_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A3SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", with_1, "-", with_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", dist_2, "-", with_2, sep = ""),
+                               paste(seqid, ":", with_1, "-", dist_1, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(dist_2, sep = ""),
+                               paste(with_1, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(dist_1, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(with_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(with_2, sep = "")),) %>%                          
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+         
+sig_majiq_a3ss_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `Fetal-Adult_het_wilcoxon` <= 0.01 & abs(`Fetal-Adult_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a3ss_fet_ad, by = "event_id") %>% 
+  mutate(group = "prenatal_postnatal",
+         event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Fetal-Adult_het_median_dpsi",
+         "chr" = "seqid")
+
+# ipsc - adult
+  
+sig_majiq_a3ss_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A3SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", with_1, "-", with_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", dist_2, "-", with_2, sep = ""),
+                               paste(seqid, ":", with_1, "-", dist_1, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(dist_2, sep = ""),
+                               paste(with_1, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(dist_1, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(with_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%                   
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+         
+sig_majiq_a3ss_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `iPSC_iMM-Adult_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Adult_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a3ss_cm_ad, by = "event_id") %>% 
+  mutate(group = "cm_adult",
+          event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Adult_het_median_dpsi",
+         "chr" = "seqid")
+
+# ipsc- fetal
+sig_majiq_a3ss_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A3SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", with_1, "-", with_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", dist_2, "-", with_2, sep = ""),
+                               paste(seqid, ":", with_1, "-", dist_1, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(dist_2, sep = ""),
+                               paste(with_1, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(dist_1, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(with_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%                
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+         
+sig_majiq_a3ss_cm_fet<- read_tsv('data/deltapsi/cm_prenatal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `iPSC_iMM-Fetal_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Fetal_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a3ss_cm_fet, by = "event_id") %>% 
+  mutate(group = "cm_fetal",
+          event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Fetal_het_median_dpsi",
+         "chr" = "seqid")
+
+## alternative 5' prime 
+# fetal - adult 
+
+sig_majiq_a5ss_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A5SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", ref_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", dist_1, sep = ""),
+                               paste(seqid, ":", dist_2, "-", with_2, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(dist_2, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(dist_1, sep = ""),
+                               paste(with_2, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(ref_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%     
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+
+sig_majiq_a5ss_fet_ad <- read_tsv('data/deltapsi/prenatal_postnatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `Fetal-Adult_het_wilcoxon` <= 0.01 & abs(`Fetal-Adult_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a5ss_fet_ad, by = "event_id") %>% 
+  mutate(group = "prenatal_postnatal",
+          event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Fetal-Adult_het_median_dpsi",
+                "chr" = "seqid")
+
+# ipsc - adult
+  
+sig_majiq_a5ss_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A5SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", ref_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", dist_1, sep = ""),
+                               paste(seqid, ":", dist_2, "-", with_2, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(dist_2, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(dist_1, sep = ""),
+                               paste(with_2, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(ref_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%     
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+
+sig_majiq_a5ss_cm_ad <- read_tsv('data/deltapsi/cm_postnatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `iPSC_iMM-Adult_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Adult_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a5ss_cm_ad, by = "event_id") %>% 
+  mutate(group = "cm_adult",
+          event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Adult_het_median_dpsi",
+         "chr" = "seqid")
+
+# ipsc- fetal
+sig_majiq_a5ss_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A5SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", ref_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", dist_1, sep = ""),
+                               paste(seqid, ":", dist_2, "-", with_2, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(dist_2, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(dist_1, sep = ""),
+                               paste(with_2, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(ref_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%     
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+         
+sig_majiq_a5ss_cm_fet <- read_tsv('data/deltapsi/cm_prenatal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `iPSC_iMM-Fetal_het_wilcoxon` <= 0.01 & abs(`iPSC_iMM-Fetal_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a5ss_cm_fet, by = "event_id") %>% 
+  mutate(group = "cm_fetal",
+          event_id = paste(event_id,";",lsv_id,sep="")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "iPSC_iMM-Fetal_het_median_dpsi",
+         "chr" = "seqid")
+
+sig_majiq <- rbind(sig_majiq_se_fet_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_se_cm_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_se_cm_fet %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_ri_fet_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_ri_cm_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_ri_cm_fet %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a5ss_fet_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a5ss_cm_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a5ss_cm_fet %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a3ss_fet_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a3ss_cm_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group"),
+                   sig_majiq_a3ss_cm_fet %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "group")) %>% 
+  mutate(tool = "majiq",
+         protein_coding = ifelse(gene_id %in% protein_coding_id, "Yes", "No"))
+
+write.table(sig_majiq, "results/splicing/differential_splicing/all_sig_majiq.tsv", row.names = F, sep = "\t", quote = F)
+
+
+## vast-tools ####
+
+process_vast_dpsi <- function(dpsi_df, group) {
+  dpsi_df %>%
+    filter(MV.dPsi._at_0.9 > 0 & abs(E.dPsi.) >= 0.2 & EVENT %in% rownames(psi_vastools_all)) %>%
+    dplyr::select(EVENT, E.dPsi.) %>%
+    left_join(., vast_events_coords, by = "EVENT") %>%
+    mutate(event_type = sub("^Hsa(.+?)\\d.*$", "\\1", EVENT),
+           event_type = gsub("EX", "ES", event_type),
+           event_type = gsub("INT", "RI", event_type),
+           event_type = gsub("ALTA", "A3SS", event_type),
+           event_type = gsub("ALTD", "A5SS", event_type),
+           chr = sub(":.*", "", FULL_CO),
+           FULL_CO = sub("^[^:]*:", "", FULL_CO),
+           CO_C1 = sub("^[^:]*:", "", CO_C1),    
+           CO_A = sub("^[^:]*:", "", CO_A),       
+           CO_C2 = sub("^[^:]*:", "", CO_C2),
+           C1_1 = as.numeric(str_extract(CO_C1, "[0-9]+(?=-)")),
+           C1_2 = as.numeric(str_extract(CO_C1, "(?<=-)[0-9]+")),
+           A_1 = as.numeric(str_extract(CO_A, "[0-9]+(?=-)")),
+           A_2 = as.numeric(str_extract(CO_A, "(?<=-)[0-9]+")),
+           C2_1 = as.numeric(str_extract(CO_C2, "[0-9]+(?=-)")),
+           C2_2 = as.numeric(str_extract(CO_C2, "(?<=-)[0-9]+")),
+           target_coord = paste(chr, ":", A_1, "-", A_2, sep = ""),
+           spanning_coord = ifelse(STRAND == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                   paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+           tmp_C1_1 = ifelse(STRAND == "+", C1_1, C2_1),
+           tmp_C1_2 = ifelse(STRAND == "+", C1_2, C2_2),
+           tmp_C2_1 = ifelse(STRAND == "+", C2_1, C1_1),
+           tmp_C2_2 = ifelse(STRAND == "+", C2_2, C1_2),
+           C1_1 = ifelse(STRAND == "+", paste(C1_1), paste(tmp_C1_1)),
+           C1_2 = ifelse(STRAND == "+", paste(C1_2), paste(tmp_C1_2)),
+           C2_1 = ifelse(STRAND == "+", paste(C2_1), paste(tmp_C2_1)),
+           C2_2 = ifelse(STRAND == "+", paste(C2_2), paste(tmp_C2_2)),
+           protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No"),
+           group = group) %>%
+    dplyr::select(EVENT, GeneID, GENE, chr, STRAND, FULL_CO, C1_1, C1_2, A_1, A_2, C2_1, C2_2, 
+                  target_coord, spanning_coord, E.dPsi., event_type, protein_coding, group) %>%
+    dplyr::rename("event_id" = "EVENT", "gene_id" = "GeneID", "gene_name" = "GENE", 
+                  "strand" = "STRAND", "deltaPSI" = "E.dPsi.", "target_start" = "A_1", 
+                  "target_end" = "A_2", "upstream_start" = "C1_1", 
+                  "upstream_end" ="C1_2", "downstream_start" = "C2_1", 
+                  "downstream_end" = "C2_2")
+}
+
+vast_fet_ad <- read.table("data/deltapsi/prenatal_postnatal/fetal_adult.tab", header = T, sep = "\t")  %>%
+  process_vast_dpsi(group = "prenatal_postnatal")
+vast_cm_ad <- read.table("data/deltapsi/cm_postnatal/imm_adult.tab", header = T, sep = "\t")  %>%
+  process_vast_dpsi(group = "cm_postnatal")
+vast_cm_fet <- read.table("data/deltapsi/cm_prenatal/imm_fetal.tab", header = T, sep = "\t")  %>%
+  process_vast_dpsi(group = "cm_prenatal")
+
+
+## merge all vast-tools results
+sig_vast <- rbind(vast_fet_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding", "group"),
+                   vast_cm_ad %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding", "group"),
+                   vast_cm_fet %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding", "group")) %>%  
+  mutate(tool = "vast-tools") 
+
+write.table(sig_vast, "results/splicing/differential_splicing/all_sig_vast.tsv", row.names = F, sep = "\t", quote = F)
+
+```
+
+
+```{r process sig results}
+
+## merge results from all tolls and add gene panel info ####
+all_sig_events <- rbind(sig_rmats, sig_majiq, sig_vast) %>%
+  filter(protein_coding == "Yes") %>% 
+  mutate(panel = case_when(
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$CM_enriched, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "CM_enriched", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$sarcomeric, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "sarcomeric", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$ion_channels, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "ion_channels", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$RBPs, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "RBPs", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$cardiac_SFs, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "cardiac_SF", 
+    TRUE ~ NA), 
+        full_coord = paste(target_coord, ";", spanning_coord, sep=""),
+    direction = ifelse(deltaPSI > 0, "up", ifelse(deltaPSI < 0, "down", "unchanged"))) %>% 
+    filter((group %in% "prenatal_postnatal") |
+           (group %in% c("cm_prenatal", "cm_postnatal") & event_id %in% rownames(psi_all_tools %>% filter(rowSums(is.na(dplyr::select(., contains(c("Lab"))))) == 0)))) %>% 
+    group_by(full_coord) %>% 
+  mutate(groups = paste(unique(group), collapse = ";")) %>% 
+  ungroup() %>% 
+  dplyr::select(gene_name, gene_id, panel, strand, target_coord, spanning_coord, deltaPSI, direction, event_type, group, panel, tool, event_id, full_coord, groups) %>%
+  arrange(gene_name, target_coord, spanning_coord) 
+  
+write.table(all_sig_events, "results/splicing/differential_splicing/all_sig_events.tsv", row.names = F, sep = "\t", quote = F)
+
+
+## summarize events for supplementary
+all_sig_events_supp <- all_sig_events %>% 
+  group_by(group, full_coord) %>%
+  distinct(full_coord, .keep_all = TRUE) %>%  
+  slice_max(order_by = abs(deltaPSI)) %>%   # keep the highest deltaPSI for all events with the same target and spanning coordinates for each comparison
+  slice_head(n = 1) %>%  # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+  ungroup() %>% 
+  dplyr::select(gene_name, gene_id, target_coord, spanning_coord, event_type, deltaPSI, direction, group) %>% 
+  arrange(gene_name, target_coord, spanning_coord) 
+
+write.table(all_sig_events_supp, "results/splicing/differential_splicing/all_sig_events_supplementary.tsv", row.names = F, sep = "\t", quote = F) 
+
+
+## identify developmental and ipsc-specific events, and summarize results ####
+all_sig_events_type <- all_sig_events %>% 
+  mutate(type = case_when(
+    grepl("prenatal_postnatal", groups) ~ "maturation",
+    grepl("cm_prenatal", groups) & grepl("cm_postnatal", groups) ~ "ipsc-specific",
+    TRUE ~ NA_character_)) %>% 
+  group_by(full_coord) %>% 
+  distinct(full_coord, .keep_all = TRUE) %>%  
+  slice_max(order_by = abs(deltaPSI)) %>%   # keep the highest deltaPSI for all events with the same target and spanning coordinates
+  slice_head(n = 1) %>%  # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+  ungroup() %>% 
+  drop_na(type) %>% 
+  dplyr::select(gene_name, gene_id, strand, target_coord, spanning_coord, deltaPSI, direction, event_type, event_id, full_coord, type, groups) %>% 
+  arrange(gene_name, target_coord, spanning_coord) 
+
+## calculate median PSI per stage for all events ####
+calculate_median_psi_all <- function(data) {
+  result <- data %>%
+    group_by(event_id, stage) %>%
+    summarise(median_psi = median(PSI, na.rm = TRUE), .groups = 'drop') %>%
+    pivot_wider(names_from = stage, values_from = median_psi, names_prefix = "median_psi_")
+  return(result)
+}
+
+median_psi_data <- psi_all_tools[rownames(psi_all_tools) %in% all_sig_events_type$event_id,] %>% 
+  as_tibble(rownames = "event_id") %>%
+  pivot_longer(!event_id, names_to = "sample", values_to = "PSI") %>%
+  left_join(all_sig_events_type, by = "event_id") %>%
+  filter(!grepl("MDC", sample)) %>% 
+  mutate(
+    stage = rep(c(rep("iPSC-CM", 3), rep("Prenatal\nHeart", 38), rep("Postnatal\nHeart", 12)), times = length(rownames(.))/53),
+    stage = factor(stage, levels = unique(stage)),
+    age = rep(c(rep("iPSC-CM_iMM", 3), rep("Embryo\n4-7w", 9), rep("Embryo\n8-10w", 12), 
+                rep("Fetus\n11-13w", 10), rep("Fetus\n16-19w", 7), rep("Neonatal", 2), rep("Infant", 5), rep("Child", 3), rep("Adult", 2)), 
+             times = length(rownames(.))/53),
+    age = factor(age, levels = unique(age)),
+    PSI = as.numeric(PSI)
+  ) %>%
+  calculate_median_psi_all() 
+
+# merge with events info
+all_sig_events_type <- all_sig_events_type %>%
+  left_join(median_psi_data, by = "event_id")
+
+write.table(all_sig_events_type, "results/splicing/differential_splicing/all_sig_events_type.tsv", row.names = F, sep = "\t", quote = F)  
+
+```
+
+```{r barplot - number of AS event types per group, echo=FALSE}
+
+all_sig_events %>% 
+    group_by(group, full_coord) %>%  # if event detected by more than just 1 tool, count just 1 per group
+    slice_head(n = 1) %>% 
+    group_by(group, event_type, sign(deltaPSI)) %>% 
+    summarise(n = n()) %>% 
+    mutate(direction = `sign(deltaPSI)`*n,
+           group = factor(group, levels = c("prenatal_postnatal", "cm_prenatal", "cm_postnatal"))) %>% 
+    ggplot(aes(group, direction, fill = event_type)) + 
+    geom_col(position = position_dodge(), alpha = 1, colour = "black") +
+    theme_minimal() + 
+    scale_fill_manual(values = c("#63A375","#EDC79B","#D57A66","#CA6680")) +
+    ylab("Number of Events") + 
+    labs(fill = "Event type") +
+    theme(axis.title.y = element_text(size = 12, face="bold"), 
+          strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+          legend.title = element_text(size = 10, face="bold"), 
+          legend.text = element_text(size = 8),
+          axis.text.y = element_text(size = 10,face = "bold"),
+          axis.text.x = element_text(size = 8, face = "bold"),
+          axis.title.x = element_blank(),
+          legend.key.size = unit(1, "line")) +
+    scale_y_continuous(limits = c(-420, 200)) +
+    scale_x_discrete(labels = c("Prenatal Heart vs \n Postnatal Heart", "iPSC-CM vs \n Prenatal Heart", "iPSC-CM vs \n Postnatal Heart"))
+  
+ggsave(last_plot(), filename = "barplot_sig_events.pdf", path = "results/splicing/differential_splicing", width = 6, height = 3.5, units = "in")
+
+```
+
+```{r heatmap }
+library("pheatmap")
+library("RColorBrewer")
+library("cowplot")
+
+## Exon Skipping ####
+
+se <- all_sig_events %>% 
+  filter(event_type == "ES") 
+input_heat_se <- psi_all_tools[rownames(psi_all_tools) %in% se$event_id, ]
+input_heat_se <- input_heat_se %>% dplyr::select(-contains("iPSC"))
+input_heat_se[is.na(input_heat_se)] = 0
+
+set.seed(1)
+heat_se <- pheatmap(input_heat_se,
+         scale = "row",
+         clustering_distance_rows = as.dist(1 - cor(t(input_heat_se), method = "spearman")),
+         color = colorRampPalette(rev(brewer.pal(n = 10, name = "RdYlBu")))(100), 
+         border_color = NA,
+         show_rownames = FALSE, 
+         show_colnames = TRUE, 
+         clustering_method = "complete",
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE,
+         na_col = "grey90",
+         annotation_col = coldata %>% filter(Groups != "iPSC") %>% dplyr::select("Stage"), 
+         annotation_colors = list(Stage = c("iPSC-CM" = "#DC533C", "Prenatal" = "#278BAE", "Postnatal" = "#3DAB3E")),
+         treeheight_row = 0,
+         cutree_rows = 4,
+         legend = T,
+         labels_col = c(rep("iPSC-CM", 3), rep("Embryo_4w", 2), rep("Embryo_5w", 2), rep("Embryo_6w", 2), rep("Embryo_7w", 3), rep("Embryo_8w", 5), rep("Embryo_9w", 3), rep("Embryo_10w", 4), rep("Fetus_11w", 4), rep("Fetus_12w", 2), rep("Fetus_13w", 4), rep("Fetus_16w", 3), rep("Fetus_18w", 1), rep("Fetus_19w", 3), rep("Neonatal", 2), rep("Infant", 5), rep("Child", 3), rep("Adult", 2)),
+         return_list = TRUE)
+heat_se
+save_plot(plot = heat_se, filename = "results/splicing/differential_splicing/heatmap_SE_spearman_complete.png", base_height = 6, base_width = 9)
+
+
+###### intron retention ######
+
+ri <- all_sig_events %>% 
+  filter(event_type == "RI") 
+input_heat_ri <- psi_all_tools[rownames(psi_all_tools) %in% ri$event_id, ]
+input_heat_ri <- input_heat_ri %>% dplyr::select(-contains("iPSC"))
+input_heat_ri[is.na(input_heat_ri)] = 0
+
+set.seed(1)
+heat_ri <- pheatmap(input_heat_ri,
+         scale = "row",
+         clustering_distance_rows = as.dist(1 - cor(t(input_heat_ri), method = "spearman")),
+         color = colorRampPalette(rev(brewer.pal(n = 10, name = "RdYlBu")))(100), 
+         border_color = NA,
+         show_rownames = FALSE, 
+         show_colnames = TRUE, 
+         clustering_method = "complete",
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE,
+         na_col = "grey90",
+         annotation_col = coldata %>% filter(Groups != "iPSC") %>% dplyr::select("Stage"), 
+         annotation_colors = list(Stage = c("iPSC-CM" = "#DC533C", "Prenatal" = "#278BAE", "Postnatal" = "#3DAB3E")),
+         treeheight_row = 0,
+         cutree_rows = 3,
+         legend = T,
+         labels_col = c(rep("iPSC-CM", 3), rep("Embryo_4w", 2), rep("Embryo_5w", 2), rep("Embryo_6w", 2), rep("Embryo_7w", 3), rep("Embryo_8w", 5), rep("Embryo_9w", 3), rep("Embryo_10w", 4), rep("Fetus_11w", 4), rep("Fetus_12w", 2), rep("Fetus_13w", 4), rep("Fetus_16w", 3), rep("Fetus_18w", 1), rep("Fetus_19w", 3), rep("Neonatal", 2), rep("Infant", 5), rep("Child", 3), rep("Adult", 2)),
+         return_list = TRUE)
+heat_ri
+save_plot(plot = heat_ri, filename = "results/splicing/differential_splicing/heatmap_RI_spearman_complete.png", base_height = 6, base_width = 9)
+
+```
+
+```{r NEASE }
+
+## create input files ####
+
+# maturation
+mat <- all_sig_events_type %>% 
+              filter(event_type == "ES" & type == "maturation") %>% 
+              group_by(full_coord) %>% 
+              distinct(full_coord, .keep_all = TRUE) %>% 
+              slice_max(order_by = abs(deltaPSI)) %>%  # when same event is detected by different tools, choose that with the highest deltaPSI
+              slice_head(n = 1) %>% # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+              ungroup() %>%
+              unique() %>% 
+              separate(target_coord, into = c("chr", "start", "end"), sep = "[:-]") %>% 
+              dplyr::select(gene_id, start, end, deltaPSI)
+write.table(mat, "results/splicing/nease/dev/nease_se_development.tsv", row.names = F, quote = F, sep = "\t")  
+
+# ipsc-specific
+ipsc <- all_sig_events_type %>% 
+              filter(event_type == "ES" & type == "ipsc-specific") %>% 
+              group_by(full_coord) %>% 
+              distinct(full_coord, .keep_all = TRUE) %>% 
+              slice_max(order_by = abs(deltaPSI)) %>%  # when same event is detected by different tools, choose that with the highest deltaPSI
+              slice_head(n = 1) %>% # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+              ungroup() %>%
+              unique() %>% 
+              separate(target_coord, into = c("chr", "start", "end"), sep = "[:-]") %>% 
+              dplyr::select(gene_id, start, end, deltaPSI)
+write.table(ipsc, "results/splicing/nease/ipsc/nease_se_ipsc.tsv", row.names = F, quote = F, sep = "\t")  
+
+
+library("viridis")
+
+wrap_text <- function(text, width = 30) {
+  wrapped_text <- sapply(text, function(x) paste(strwrap(x, width = width), collapse = "\n"))
+  return(wrapped_text)
+}
+
+generate_nease_plot <- function(input_file) {
+  nease <- read.table(input_file, header = TRUE, sep = ",") %>% 
+    mutate(Pathway.name = wrap_text(Pathway.name, width = 25)) %>% 
+  arrange(adj.p_value)
+  
+  p <- ggplot(head(nease, 5), 
+              aes(x = Nease.score, 
+                  y = factor(Pathway.name, levels = unique(Pathway.name[order(Nease.score)])), 
+                  fill = -log10(`adj.p_value`))) + 
+    geom_bar(stat = "identity", 
+             position = "dodge", 
+             alpha = 0.7, 
+             color = "black", 
+             linewidth = 0.4) +
+    xlab("NEASE score") +
+    ylab("Reactome Pathway") +
+    labs(fill = "-log10\nadjusted\np-value") +
+    theme_minimal() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(size = 14, colour = "black"), 
+          axis.title.x = element_text(size = 14, face = "bold"),
+          axis.title.y = element_text(size = 15, face = "bold"),
+          plot.title = element_text(size = 18, face = "bold", hjust = 0.5, vjust = 0),
+          legend.title = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          legend.key.height = unit(1, 'cm')) +
+    scale_fill_gradient(low = "#B1D5E9", high = "#3B7798") 
+  
+  return(p)
+}
+
+generate_nease_plot("results/splicing/nease/ipsc/nease_enr_Reactome.csv")
+ggsave(last_plot(), filename = "nease_pathways_ipsc.pdf", path = "results/splicing/nease/ipsc", width = 8, height = 4)
+
+generate_nease_plot("results/splicing/nease/dev/nease_enr_Reactome.csv")
+ggsave(last_plot(), filename = "nease_pathways_development.pdf", path = "results/splicing/nease/dev", width = 8, height = 4)
+
+```
+
+```{r plot individual events}
+
+events <- all_sig_events_type %>% 
+  dplyr::select(gene_name, event_id, target_coord) 
+
+psi_long <- psi_all_tools[rownames(psi_all_tools) %in% events$event_id,] %>% 
+  as_tibble(rownames = "event_id") %>% 
+  pivot_longer(!event_id, names_to = "sample", values_to = "PSI") %>% 
+  left_join(., events, by = "event_id") %>% 
+  dplyr::select(gene_name, event_id, target_coord, sample, PSI) %>% 
+  mutate(stage = rep(c(rep("iPSC-CM", 3), rep("iPSC-CM\nExternal", 3), rep("Prenatal\nHeart", 38), rep("Postnatal\nHeart", 12)), times = length(rownames(.))/56),       
+         stage = factor(stage, levels = c("iPSC-CM", "iPSC-CM\nExternal", "Prenatal\nHeart", "Postnatal\nHeart")),
+         age = rep(coldata %>% pull("Groups"), times = length(rownames(.))/56),
+         age = factor(age, levels = unique(coldata %>% pull("Groups"))),
+         PSI = as.numeric(PSI))
+
+
+## plot specific events per stage ####
+
+plot_psi_by_event_id_per_stage <- function(df, event, include_mdc = FALSE) {
+  
+  filtered_data <- df %>% filter(event_id == event)
+  
+  if (include_mdc) {
+  filtered_data <- filtered_data}
+  else {filtered_data <- filtered_data %>% filter(!age %in% c("MDC"))}
+  
+  color_values <- if (include_mdc) {
+    c("#E8401B", "brown", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724")}
+  else {c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724")}
+  
+  temp_plot <- ggplot(filtered_data, aes(x = stage, y = PSI)) +
+    geom_jitter(aes(colour = age), width = 0.1, size = 4) + 
+    stat_summary(fun = "median", geom = "crossbar", linewidth = .4, color = "#BEBBC1") +
+    theme_light(base_size = 15) + 
+    ggtitle(unique(filtered_data$gene_name), subtitle = unique(filtered_data$target_coord)) + 
+    theme(
+      plot.title = element_text(size = 14, face = "bold.italic", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.title.x = element_blank(),
+      axis.text.y = element_text(size = 8, face = "bold"),
+      axis.text.x = element_text(size = 7, face = "bold"),
+      legend.position = "none") +
+    expand_limits(y = c(0, 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_color_manual(values = color_values) +
+    ylab("PSI (Percentage Spliced In)") +
+    labs(color = "Age") 
+  
+  print(temp_plot)
+  
+  file_name <- paste0("plot_", unique(filtered_data$gene_name), "_", unique(filtered_data$event_id), if (include_mdc) "_stage_with_mdc" else "_stage", ".pdf")
+  ggsave(temp_plot, filename = file_name, path = "results/splicing/", width = 2.8, height = 2.8, units = "in")
+}
+
+# Fig 6
+plot_psi_by_event_id_per_stage(psi_long, "HsaINT0102211", include_mdc = TRUE) # METTL3
+plot_psi_by_event_id_per_stage(psi_long, "chr2:-:200860125-200860215:200859680-200859746:200861238-200861466", include_mdc = TRUE) # CLK1
+plot_psi_by_event_id_per_stage(psi_long, "chr5:-:178617344-178617434:178616882-178616948:178618556-178618778", include_mdc = TRUE) # CLK4
+plot_psi_by_event_id_per_stage(psi_long, "chr1:+:203862182-203862222:203861850-203861955:203863663-203863725", include_mdc = TRUE) # SNRPE
+plot_psi_by_event_id_per_stage(psi_long, "chr13:+:114286302-114286400:114282837-114282943:114286519-114286629", include_mdc = TRUE) # UPF3A
+plot_psi_by_event_id_per_stage(psi_long, "chr11:-:59655956-59656045:59655523-59655740:59656499-59656600", include_mdc = TRUE) # PATL1
+plot_psi_by_event_id_per_stage(psi_long, "HsaINT0159228", include_mdc = TRUE) # SRSF1
+plot_psi_by_event_id_per_stage(psi_long, "chr6:+:36599821-36600276:36598849-36598983:36601152-36601190", include_mdc = TRUE) # SRSF3
+plot_psi_by_event_id_per_stage(psi_long, "chr20:+:43459153-43459420:43458361-43458509:43459771-43459895", include_mdc = TRUE) # SRSF6
+plot_psi_by_event_id_per_stage(psi_long, "chr14:+:69768798-69770540:69768798-69769251:69770467-69770540", include_mdc = TRUE) # SRSF5
+plot_psi_by_event_id_per_stage(psi_long, "chr3:-:185931577-185931852:185926601-185926734:185937825-185938029", include_mdc = TRUE) # TRA2B
+plot_psi_by_event_id_per_stage(psi_long, "chr15:+:63044027-63044152:63043706-63043831:63056985-63057111", include_mdc = TRUE) # TPM1
+plot_psi_by_event_id_per_stage(psi_long, "chr1:-:25244454-25244498:25243550-25243633:25245150-25245301", include_mdc = TRUE) # RSRP1
+
+
+
+
+## plot specific events per age ####
+
+plot_psi_by_event_id_per_age <- function(df, event, include_cm = FALSE) {
+  
+  filtered_data <- df %>% filter(event_id == event)
+  
+  if (include_cm) {
+  filtered_data <- filtered_data %>% filter(!age %in% c("iPSC-CM_Ext"))}
+  else {filtered_data <- filtered_data %>% filter(!age %in% c("iPSC-CM_Ext", "iPSC-CM"))}
+  
+  color_palette <- if (include_cm) {
+    c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9", "#045381", "#A3E587", "#76CE50", "#70BD4F", "#0A8724")}
+  else {c("#BCE6FF", "#7CBFE7", "#2983B9", "#045381", "#A3E587", "#76CE50", "#70BD4F", "#0A8724")}
+  
+  # Create the plot
+  temp_plot <- ggplot(filtered_data, aes(x = age, y = PSI)) +
+    geom_jitter(aes(colour = age), width = 0.1, size = 3) +
+    stat_summary(fun = "median", geom = "crossbar", linewidth = 0.4, color = "#BEBBC1") +
+    theme_light(base_size = 15) +
+    ggtitle(unique(filtered_data$gene_name), subtitle = unique(filtered_data$target_coord)) +
+    theme(plot.title = element_text(size = 14, face = "bold.italic", hjust = 0.5),
+          plot.subtitle = element_text(size = 12, hjust = 0.5),
+          axis.title.y = element_text(size = 10, face = "bold"),
+          axis.title.x = element_blank(),
+          axis.text.y = element_text(size = 8, face = "bold"),
+          axis.text.x = element_text(size = 8, face = "bold", angle = 45, vjust = 0.98, hjust = 1),
+          legend.position = "none") +
+    expand_limits(y = c(0, 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_color_manual(values = color_palette) +
+    ylab("PSI (Percentage Spliced In)") +
+    labs(color = "Age")
+  
+  print(temp_plot)
+  file_name <- paste0("plot_", unique(filtered_data$gene_name), "_", unique(filtered_data$event_id), 
+                      if (include_cm) "_age" else "_age_no_cm", ".pdf")
+  ggsave(temp_plot, filename = file_name, path = "results/splicing", width = 3.1, height = 3.5, units = "in")
+}
+
+# Fig 3
+plot_psi_by_event_id_per_age(psi_long, "chr18:-:3129232-3129519:3126701-3126897:3131375-3131496", include_cm = TRUE) # MYOM1
+plot_psi_by_event_id_per_age(psi_long, "chr3:+:152446704-152446757:152445282-152445539:152447620-152447773", include_cm = TRUE) # MBNL1
+plot_psi_by_event_id_per_age(psi_long, "chr1:-:201362386-201362391:201361913-201362022:201363296-201363406", include_cm = TRUE) # TNNT2
+plot_psi_by_event_id_per_age(psi_long, "chr1:-:154172029-154172104:154171413-154171488:154172908-154172978", include_cm = TRUE) # TPM3
+plot_psi_by_event_id_per_age(psi_long, "chr12:+:56160626-56160670:56160243-56160320:56161387-56161550", include_cm = TRUE) # MYL6
+plot_psi_by_event_id_per_age(psi_long, "chr2:-:215380811-215381080:215379130-215379317:215382212-215382325", include_cm = FALSE) # FN1
+plot_psi_by_event_id_per_age(psi_long, "chr2:-:215392931-215393203:215391632-215391814:215394528-215394719", include_cm = FALSE) # FN1
+plot_psi_by_event_id_per_age(psi_long, "chr14:-:52861587-52861610:52861014-52861034:52864401-52864622", include_cm = FALSE) # FERMT2
+plot_psi_by_event_id_per_age(psi_long, "chr14:-:52861587-52861610:52861014-52861034:52864401-52864622", include_cm = TRUE) # FERMT2
+plot_psi_by_event_id_per_age(psi_long, "chr3:+:13621775-13621915:13619730-13619831:13626445-13626579", include_cm = FALSE) # FBLN2
+plot_psi_by_event_id_per_age(psi_long, "chr19:-:1612207-1612430:1610965-1611849:1615285-1615821", include_cm = TRUE) # TCF3
+plot_psi_by_event_id_per_age(psi_long, "chr1:-:156476494-156476514:156475108-156475237:156477012-156477202", include_cm = TRUE) # MEF2D
+plot_psi_by_event_id_per_age(psi_long, "chr3:+:158593382-158593426:158592434-158592581:158596862-158596945", include_cm = TRUE) # MEF2D
+plot_psi_by_event_id_per_age(psi_long, "chr3:+:57907884-57908006:57896873-57896932:57909076-57909150", include_cm = TRUE) # SLMAP
+plot_psi_by_event_id_per_age(psi_long, "chr2:-:86170749-86170844:86166508-86166644:86171208-86171312", include_cm = TRUE) # IMMT
+plot_psi_by_event_id_per_age(psi_long, "HsaEX0047869", include_cm = TRUE) # PKM
+plot_psi_by_event_id_per_age(psi_long, "chr19:+:38710257-38710342:38709395-38709476:38711276-38711361", include_cm = TRUE) # ACTN4
+
+
+
+# Fig 5
+plot_psi_by_event_id_per_age(psi_long, "chr1:-:201369816-201369845:201368162-201368222:201372027-201372041", include_cm = TRUE) # TNNT2
+plot_psi_by_event_id_per_age(psi_long, "chr5:+:79747091-79747113:79745222-79745455:79752676-79752794", include_cm = TRUE) # CMYA5
+plot_psi_by_event_id_per_age(psi_long, "chr10:+:86706531-86706719:86692535-86692571:86709905-86710050", include_cm = TRUE) # LDB3
+plot_psi_by_event_id_per_age(psi_long, "chr10:+:86681436-86681803:86680082-86680157:86685678-86685700", include_cm = TRUE) # LDB3
+plot_psi_by_event_id_per_age(psi_long, "chr10:+:86685678-86685700:86680082-86680157:86691896-86692065", include_cm = TRUE) # LDB3
+plot_psi_by_event_id_per_age(psi_long, "chr10:+:86687069-86687272:86680082-86680157:86691896-86692065", include_cm = TRUE) # LDB3
+plot_psi_by_event_id_per_age(psi_long, "chr6:-:123375605-123375631:123366135-123366182:123377716-123377742", include_cm = TRUE) # TRDN
+plot_psi_by_event_id_per_age(psi_long, "chr4:-:113455726-113455821:113451032-113454515:113457335-113457563", include_cm = TRUE) # CAMK2D
+
+
+```
+
+```{r correlation with gene expression}
+
+# import normalized counts
+normalized_counts <- read.table("results/gene_expression/normalized_counts.tsv", header = T, sep = "\t", row.names = 1)
+
+norm_counts <- normalized_counts %>% 
+  as_tibble(rownames = "gene_id") %>% 
+  pivot_longer(!gene_id, names_to = "sample", values_to = "expression") %>% 
+  mutate(gene_symbol = mapIds(org.Hs.eg.db, keys = gene_id, column = "SYMBOL", keytype = "ENSEMBL"),
+         sample = rep(rownames(coldata %>% filter(Groups != "iPSC-CM_Ext")), times = length(rownames(normalized_counts))),
+         stage = rep(coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull("Stage"), times = length(rownames(normalized_counts))),
+         stage = factor(stage, levels = unique(stage)),
+         age = rep(coldata %>% filter(Groups != "iPSC-CM_Ext") %>% pull("Groups"), times = length(rownames(normalized_counts))),
+         age = factor(age, levels = unique(age))) %>% 
+  group_by(gene_id)
+
+
+psi_tpm <- psi_all_tools[rownames(psi_all_tools) %in% all_sig_events_type$event_id,] %>% 
+  as_tibble(rownames = "event_id") %>% 
+  dplyr::select(-contains("MDC")) %>% 
+  pivot_longer(!event_id, names_to = "sample", values_to = "PSI") %>% 
+  left_join(., event_gene, by = "event_id") %>% 
+  left_join(., norm_counts, by = c("gene_id", "sample")) %>% 
+  dplyr::select(event_id, gene_id, gene_symbol, sample, stage, age, expression, PSI) %>% 
+  arrange(gene_symbol)
+write.table(psi_tpm, "results/splicing/psi_tpm.tsv", row.names = F, sep = "\t", quote = F)
+
+plot_psi_vs_counts <- function(df, event) {
+  
+  filtered_data <- df %>% filter(event_id == event) 
+  
+  temp_plot <- ggplot(filtered_data, aes(x = expression, y = PSI)) +
+    geom_jitter(aes(colour = age), width = 0.1, size = 2.5) + 
+    theme_light(base_size = 15) + 
+    ggtitle(unique(filtered_data$gene_symbol)) + 
+    theme(plot.title = element_text(size = 14, face = "bold.italic", hjust = 0.5),
+          axis.title.y = element_text(size = 10, face = "bold"),
+          axis.title.x = element_text(size = 10, face = "bold"),
+          axis.text.y = element_text(size = 8, face = "bold"),
+          axis.text.x = element_text(size = 8.5, face = "bold"),
+          legend.position = "none") +
+    expand_limits(y = c(0, 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_color_manual(values = c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724")) +
+    xlab("Normalized gene expression") +
+    ylab("PSI (Percentage Spliced In)") +
+    labs(color = "Age") 
+  
+  print(temp_plot)
+  
+  file_name <- paste0("plot_", unique(filtered_data$gene_symbol), "_", unique(filtered_data$event_id), "_correlation", ".pdf")
+  ggsave(temp_plot, filename = file_name, path = "results/splicing/correlation", width = 2.8, height = 2.8, units = "in")
+}
+
+plot_psi_vs_counts(psi_tpm, "chr5:+:79747091-79747113:79745222-79745455:79752676-79752794") 
+plot_psi_vs_counts(psi_tpm, "chr1:-:25244454-25244498:25243550-25243633:25245150-25245301") 
+
+
+```
+
+#################################
+###### Embryonic vs Fetal #######
+#################################
+
+```{r import info}
+
+# metadata
+coldata_prenatal <- coldata %>% 
+  filter(Age == "4w" | Age == "5w" | Age == "18w" | Age == "19w" | Groups == "iPSC-CM") %>% 
+  mutate(Stage = c(rep("iPSC-CM", 3), rep("Embryonic", 4), rep("Fetal", 4))) 
+rownames(coldata_prenatal)[4:7] <- gsub("Fetal", "Embryonic", rownames(coldata_prenatal)[4:7])
+
+```
+
+```{r import PSIs}
+
+### rMATS ####
+rmats_sample_order <- c("iPSC_1", "iPSC_2", "iPSC_3", "Lab_1", "Lab_2", "Lab_3", "MDC_1", "MDC_2", "MDC_3", "Embryonic_ERR2598167", "Embryonic_ERR2598168", "Embryonic_ERR2598182", "Embryonic_ERR2598183", "Fetal_ERR2598138", "Fetal_ERR2598153", "Fetal_ERR2598154", "Fetal_ERR2598155")
+
+process_rmats_psi <- function(psi_df){
+  coverage_pass <- psi_df %>% 
+    dplyr::select("event_id", "IJC_SAMPLE_1", "SJC_SAMPLE_1") %>% 
+    separate(., col = IJC_SAMPLE_1, into = paste("IJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    separate(., col = SJC_SAMPLE_1, into = paste("SJC_", rmats_sample_order, sep = ""), sep = ",") %>% 
+    mutate_all(~ ifelse(. == "NA", NA, .)) %>% 
+   filter((rowSums(dplyr::select(., contains("IJC_Embryonic")) >= 20) >= ncol(dplyr::select(., contains("IJC_Embryonic"))) / 2  | 
+           rowSums(dplyr::select(., contains("SJC_Embryonic")) >= 20) >= ncol(dplyr::select(., contains("SJC_Embryonic"))) / 2 ) &
+           (rowSums(dplyr::select(., contains("IJC_Fetal")) >= 20) >= ncol(dplyr::select(., contains("IJC_Fetal"))) / 2  | 
+           rowSums(dplyr::select(., contains("SJC_Fetal")) >= 20) >= ncol(dplyr::select(., contains("SJC_Fetal"))) / 2 )) %>%
+    pull("event_id")
+
+  processed_psi <- psi_df %>% 
+    dplyr::select("event_id", "GeneID", "IncLevel1") %>% 
+    mutate(GeneID = gsub("\\..*", "", GeneID)) %>%    
+    filter(GeneID %in% protein_coding_id & event_id %in% coverage_pass) %>%     
+    separate(., col = IncLevel1, into = rmats_sample_order, sep = ",") %>%
+    dplyr::select(-contains(c("MDC", "iPSC"))) %>% 
+    mutate_all(~ ifelse(. == "NA", NA, .)) 
+  return(processed_psi)
+}
+
+psi_rmats_SE <- read.table("data/psi_prenatal/SE.MATS.JC.txt", header = T, sep = "\t", row.names = 1) %>% 
+  mutate(event_id = paste(chr,":", strand,":", exonStart_0base + 1,"-", exonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = ""))  %>% 
+  process_rmats_psi()
+
+psi_rmats_RI <- read.table("data/psi_prenatal/RI.MATS.JC.txt", header = T, sep = "\t", row.names = 1) %>% 
+  mutate(event_id = paste(chr, ":", strand, ":", riExonStart_0base + 1, "-", riExonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = ""))  %>% 
+  process_rmats_psi()
+
+psi_rmats_A5SS <- read.table("data/psi_prenatal/A5SS.MATS.JC.txt", header = T, sep = "\t", row.names = 1) %>% 
+  mutate(event_id = paste(chr, ":", strand,":", longExonStart_0base + 1,"-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = ""))  %>% 
+  process_rmats_psi()
+
+psi_rmats_A3SS <- read.table("data/psi_prenatal/A3SS.MATS.JC.txt", header = T, sep = "\t", row.names = 1) %>% 
+  mutate(event_id = paste(chr, ":", strand, ":",  longExonStart_0base + 1,"-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = ""))  %>% 
+  process_rmats_psi()
+
+# merge PSI of different event types
+rmats_event_gene <- rbind(psi_rmats_SE, psi_rmats_RI, psi_rmats_A5SS, psi_rmats_A3SS) %>% 
+  dplyr::select(event_id, GeneID)
+
+psi_rmats_all <- rbind(psi_rmats_SE, psi_rmats_RI, psi_rmats_A5SS, psi_rmats_A3SS) %>% 
+  column_to_rownames(., var = "event_id") %>% 
+  dplyr::select(-GeneID) %>%
+  dplyr::select(all_of(rownames(coldata_prenatal))) %>% 
+  mutate_all(as.numeric) %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Embryonic")))) <= ncol(dplyr::select(., contains("Embryonic"))) / 3 &  ## remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 3) 
+
+write.table(psi_rmats_all, "results/splicing/psi_rmats_all_prenatal.tsv", row.names = T, sep = "\t", quote = F)
+
+
+### MAJIQ ####
+### this will include duplicated junctions (source and target) for the same event - care for what is used for 
+# https://biociphers.bitbucket.io/majiq-docs-academic/modulizer/event-types.html#cassette 
+
+psi_majiq_SE <- read.table("data/psi_prenatal/cassette.tsv", header=T, sep="\t") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>%     # filter for junctions that support the inclusion of the cassette exon ("C1_A", "C2_A")
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+psi_majiq_RI <- read.table("data/psi_prenatal/alternative_intron.tsv", header=T, sep="\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name == "C2_C1_intron") %>%   # filter for junctions that support the retention of the intron 
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*","",gene_id)) %>% 
+  ungroup()
+
+psi_majiq_A3SS <- read.table("data/psi_prenatal/alt3prime.tsv", header=T, sep="\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal") %>%    # filter for junctions that support the 5'ss exon shortening
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+psi_majiq_A5SS <- read.table("data/psi_prenatal/alt5prime.tsv", header=T, sep="\t") %>%   
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal") %>%    # filter for junctions that support the 5'ss exon shortening
+  dplyr::select(., c("event_id", "gene_id", "lsv_id", contains("median"))) %>% 
+  mutate(gene_id = gsub("\\..*", "", gene_id)) %>% 
+  ungroup()
+
+# merge PSI of different event types
+majiq_event_gene <- rbind(psi_majiq_SE, psi_majiq_RI, psi_majiq_A3SS, psi_majiq_A5SS) %>% 
+  dplyr::select("event_id", "lsv_id", "gene_id")
+
+psi_majiq_all <- rbind(psi_majiq_SE, psi_majiq_RI, psi_majiq_A3SS, psi_majiq_A5SS) %>% 
+  dplyr::select(., -contains("MDC")) %>% 
+  filter(gene_id %in% protein_coding_id) %>%  # filter for events in protein coding genes
+  mutate(event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::select(., -c("lsv_id", "gene_id")) %>% 
+  column_to_rownames(.,var = "event_id") %>% 
+  rename_with(~ gsub("_median_psi", "", .)) %>% 
+  dplyr::select(all_of(rownames(coldata_prenatal))) %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Lab")))) < 1 &
+           rowSums(is.na(dplyr::select(., contains("Embryonic")))) <= ncol(dplyr::select(., contains("Embryonic"))) / 2 &   # remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 2) 
+
+write.table(psi_majiq_all, "results/splicing/psi_majiq_all.tsv", row.names = T, sep = "\t", quote = F)
+
+
+## vast-tools ####
+vast_events_coords <- read.table("data/vast_events_coords.tsv", header = T, sep = "\t") %>% # import additional info about VastDB events 
+  filter(GeneID %in% protein_coding_id)
+psi_vastools_all <- read.table("data/psi_prenatal/INCLUSION_LEVELS_FULL_TIDY.tsv", header = T, row.names = 1)
+psi_vastools_tidy <- read.table("data/psi_prenatal/INCLUSION_LEVELS_TIDY_Fr05_SD5_noVLOW.tsv", header = T, row.names = 1) # import events that passed filtering with tidy - 50% of prenatal and postnatal samples have enough coverage. only 2 groups can be used for filtering, the heart samples were chosen because their coverage is much lower than that of iPSC-CMs
+psi_vastools_all <- psi_vastools_all[rownames(psi_vastools_all) %in% rownames(psi_vastools_tidy), ] # subset total events, including iPSC-CMs,to those that passed tidy filtering 
+psi_vastools_all <- psi_vastools_all[rownames(psi_vastools_all) %in% vast_events_coords$EVENT, ] 
+psi_vastools_all <- psi_vastools_all/100    # make PSI between 0 and 1
+psi_vastools_all <- psi_vastools_all %>% 
+  filter(rowSums(is.na(dplyr::select(., contains("Lab")))) < 1 &
+           rowSums(is.na(dplyr::select(., contains("Fetal")))) <= ncol(dplyr::select(., contains("Fetal"))) / 2 &  ## remove rows with more than 1/3 of NAs in each group
+           rowSums(is.na(dplyr::select(., contains("Adult")))) <= ncol(dplyr::select(., contains("Adult"))) / 2) %>% 
+  dplyr::select(., -contains(c("MDC", "iPSC"))) %>% 
+  dplyr::select(all_of(rownames(coldata_prenatal))) 
+
+write.table(psi_vastools_all, "results/splicing/psi_vastools_all.tsv", row.names = T, sep = "\t", quote = F)
+
+# extract correspondence event - gene
+vast_event_gene <- vast_events_coords %>% 
+  dplyr::rename(gene_id = GeneID, event_id = EVENT) %>% 
+  dplyr::select("event_id", "gene_id") %>% 
+  filter(event_id %in% rownames(psi_vastools_all))
+
+
+## merge PSI of different tools ####
+psi_all_tools_prenatal <- rbind(psi_rmats_all, psi_majiq_all, psi_vastools_all)
+write.table(psi_all_tools_prenatal, "results/splicing/psi_all_tools_prenatal.tsv", row.names = T, sep = "\t", quote = F)
+
+```
+
+```{r PCA}
+
+# # remove rows with more than 1/3 of NAs in each group
+# this accounts for those events that passed the previous threshold where one of the groups could have not enough coverage
+psi_all_pca <- psi_rmats_all %>%
+   filter(rowSums(is.na(dplyr::select(., contains("2m")))) <= 1 &
+            rowSums(is.na(dplyr::select(., contains("5m")))) <= 1)
+
+# matrix with imputation with mean of event
+event_id <- rownames(psi_all_pca)
+psi_all_pca <- sapply(psi_all_pca[, 1:8], as.numeric) %>% as.data.frame()
+psi_all_pca[,1:8] <- t(apply(psi_all_pca[,1:8], 1, function(x)        # t makes the column mean become row mean   
+  replace(x, is.na(x), mean(x, na.rm = TRUE))))     # NAs replaced for mean of event  
+rownames(psi_all_pca) <- event_id
+
+# remove constitutive events with only 0 or 1s
+psi_all_pca <-  psi_all_pca[rowSums(psi_all_pca) > 0, ]
+psi_all_pca <- psi_all_pca[round(rowSums(psi_all_pca)) < ncol(psi_all_pca),]
+
+#############
+
+plot_pca_splicing <- function(df, n_events, pc_1st, pc_2nd, variable_color, variable_shape, filename) {
+  
+  psi_pca <- df %>% mutate_all(as.numeric) %>% 
+    na.omit()
+
+  # matrix with imputation with mean of event
+  psi_pca <- t(apply(psi_pca, 1, function(x)        # t makes the column mean become row mean   
+  replace(x, is.na(x), mean(x, na.rm = TRUE))))     # NAs replaced for mean of event  
+
+  # select 500 most variable events
+  pca <<- prcomp(t(psi_pca[(order((apply(psi_pca, 1, var)), decreasing = TRUE)[1:n_events]), ]), center = TRUE, scale = FALSE)
+  percentVar <- pca$sdev^2 / sum(pca$sdev^2 )
+  pca_matrix <- as.data.frame(pca$x) %>% 
+    mutate(Age = coldata_prenatal %>% pull(Groups),
+           Age = factor(Age, levels = unique(Age)),
+           Stage = coldata_prenatal %>% pull(Stage),
+           Stage = factor(Stage, levels = unique(Stage)))
+
+  pca_plot <- ggplot(pca_matrix, 
+                     aes_string(x = paste0("PC", pc_1st), y = paste0("PC", pc_2nd), color = variable_color, fill = variable_color, shape = variable_shape)) + 
+    geom_point(size = 5, alpha = 0.9) + 
+    xlab(paste0("PC", pc_1st, ": ", round(percentVar[pc_1st] * 100), "% variance")) +
+    ylab(paste0("PC", pc_2nd, ": ", round(percentVar[pc_2nd] * 100), "% variance")) +
+    coord_fixed() + 
+    scale_color_manual(values = c(c("#E8401B", "#7CBFE7", "#045381"))) +
+    scale_fill_manual(values = c(c("#E8401B", "#7CBFE7","#045381"))) +
+    theme(legend.title=element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          axis.title.x = element_text(color="black", size=14), 
+          axis.title.y = element_text(color="black", size=14), 
+          axis.text.x = element_text(size=12), 
+          axis.text.y = element_text(size=12)) + 
+  scale_shape_manual(values = c(16, 25, 25))
+    
+  ggsave(pca_plot, filename = paste0(pc_1st, "_", pc_2nd, "_", filename, ".pdf"), 
+         path = "results/splicing/pca", 
+         width = 5, height = 5, units = "in")
+  
+  return(pca_plot)
+}
+
+plot_pca_splicing(df = psi_rmats_all, n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "rmats_prenatal")
+plot_pca_splicing(df = psi_majiq_all, n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "majiq_prenatal")
+plot_pca_splicing(df = psi_vastools_all, n_events = 500, pc_1st = 1, pc_2nd = 2, variable_color = "Age", variable_shape = "Stage", filename = "vast_prenatal")
+
+```
+
+```{r import deltaPSIs}
+
+## rMATS ####
+
+### exon skipping ###
+
+process_rmats_dpsi_se <- function(dpsi_df){
+  dpsi_df <- dpsi_df %>% 
+    mutate(GeneID = gsub("\\..*", "", GeneID),
+           event_id = paste(chr, ":", strand, ":", exonStart_0base + 1, "-", exonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = "")) %>%
+    filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+    filter(event_id %in% rownames(psi_rmats_all)) %>% 
+    dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "exonStart_0base", "exonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "IncLevelDifference") %>%
+    mutate(exonStart_0base = paste(exonStart_0base + 1, sep = ""),
+           upstreamES = paste(upstreamES + 1, sep = ""),
+           downstreamES = paste(downstreamES + 1, sep = ""),
+           spanning_coord = paste(chr, ":", upstreamES, "-", downstreamEE, sep = ""),
+           target_coord = paste(chr, ":", exonStart_0base, "-", exonEnd, sep = ""),
+           event_type = "ES",
+           protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+    dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "protein_coding", "event_type", "IncLevelDifference", "target_coord","spanning_coord","chr", "strand", "exonStart_0base", "exonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "event_type", "protein_coding") %>% 
+    dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_start" = "exonStart_0base", "target_end" = "exonEnd", "upstream_start" = "upstreamES", "upstream_end" = "upstreamEE", "downstream_start" = "downstreamES", "downstream_end" = "downstreamEE") %>% 
+    remove_rownames()
+}
+
+deltapsi_rmats_SE <- read.table("data/deltapsi/embryonic_fetal/SE.MATS.JC.txt", header = TRUE, sep = "\t") %>% 
+  process_rmats_dpsi_se()
+
+
+### intron retention ###
+
+  process_rmats_dpsi_ri <- function(dpsi_df){
+    dpsi_df <- dpsi_df %>% 
+      mutate(GeneID = gsub("\\..*", "", GeneID),
+             event_id = paste(chr, ":", strand,":" , riExonStart_0base + 1, "-", riExonEnd, ":", upstreamES + 1, "-", upstreamEE, ":", downstreamES + 1, "-", downstreamEE, sep = ""),
+             event_type = "RI") %>%
+      filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+      filter(event_id %in% rownames(psi_rmats_all))  %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "riExonStart_0base", "riExonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "IncLevelDifference", "event_type") %>% 
+      mutate(riExonStart_0base = paste(riExonStart_0base + 1, sep = ""),
+             upstreamES = paste(upstreamES + 1, sep = ""),
+             downstreamES = paste(downstreamES + 1, sep = ""),
+             spanning_coord = paste(chr, ":", upstreamES, "-", downstreamEE, sep = ""),
+             target_coord = paste(chr, ":", upstreamEE + 1 , "-", as.numeric(downstreamES) - 1, sep = ""),
+             protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "event_type", "IncLevelDifference", "target_coord","spanning_coord","chr", "strand","riExonStart_0base", "riExonEnd", "upstreamES", "upstreamEE", "downstreamES", "downstreamEE", "protein_coding") %>% 
+      dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_start" = "riExonStart_0base", "target_end" = "riExonEnd", "upstream_start" = "upstreamES", "upstream_end" = "upstreamEE", "downstream_start" = "downstreamES", "downstream_end" = "downstreamEE") %>% 
+      remove_rownames()
+  }
+
+# read in the rMATS data and process the deltaPSI tables
+deltapsi_rmats_RI <- read.table("data/deltapsi/embryonic_fetal/RI.MATS.JC.txt", header = T, sep = "\t") %>% 
+  process_rmats_dpsi_ri()
+
+
+### alternative splice sites ###
+
+  process_rmats_dpsi_ass <- function(dpsi_df, event_type){
+    dpsi_df <- dpsi_df %>% 
+      mutate(GeneID = gsub("\\..*", "", GeneID),
+             event_id = paste(chr, ":", strand, ":", longExonStart_0base + 1, "-", longExonEnd, ":", shortES + 1, "-", shortEE, ":", flankingES + 1, "-", flankingEE, sep = ""),
+             event_type = event_type) %>%
+      filter(abs(IncLevelDifference) >= 0.2 & FDR <= 0.01) %>% 
+      filter(event_id %in% rownames(psi_rmats_all)) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "chr", "strand", "longExonStart_0base", "longExonEnd", "shortES", "shortEE", "flankingES", "flankingEE", "event_type", "IncLevelDifference") %>% 
+      mutate(longExonStart_0base = paste(longExonStart_0base + 1, sep = ""),
+             shortES = paste(shortES + 1, sep = ""),
+             spanning_coord = paste(chr, ":", longExonStart_0base, "-", longExonEnd, sep = ""),
+             target_coord = paste(chr, ":", shortES, "-", shortEE, sep = ""),
+             protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>% 
+      dplyr::select("ID", "event_id", "GeneID", "geneSymbol", "IncLevelDifference", "target_coord","spanning_coord", "chr", "strand", "longExonStart_0base", "longExonEnd", "shortES", "shortEE", "event_type", "protein_coding") %>% 
+      dplyr::rename("gene_id" = "GeneID", "gene_name" = "geneSymbol", "deltaPSI" = "IncLevelDifference", "target_long_start" = "longExonStart_0base", "target_long_end" = "longExonEnd", "target_short_start" = "shortES", "target_short_end" = "shortEE") %>% 
+      remove_rownames()
+  }
+
+# read in the rMATS data and process the A3SS and A5SS deltaPSI tables
+deltapsi_rmats_A3SS <- read.table("data/deltapsi/embryonic_fetal/A3SS.MATS.JC.txt", header=T, sep="\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A3SS")
+
+deltapsi_rmats_A5SS <- read.table("data/deltapsi/embryonic_fetal/A5SS.MATS.JC.txt", header=T, sep="\t") %>% 
+  process_rmats_dpsi_ass(event_type = "A5SS")
+
+
+### join all rMATS results ###
+sig_rmats <- rbind(deltapsi_rmats_SE %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding"), 
+                   deltapsi_rmats_RI %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding"),
+                   deltapsi_rmats_A3SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding"),
+                   deltapsi_rmats_A5SS %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", "protein_coding")) %>% 
+  remove_rownames() %>% 
+  arrange(gene_name)
+
+write.table(sig_rmats, "results/splicing/differential_splicing/all_sig_rmats_prenatal.tsv", row.names = F, sep = "\t", quote = F)
+
+
+## MAJIQ ####
+# deltaPSI >= |0.2| and wilcoxon <= 0.01
+
+## exon skipping
+sig_majiq_se <- read_tsv('data/deltapsi/embryonic_fetal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A") %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, spliced_with_coord, junction_name, reference_exon_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(reference_exon_coord)) %>% 
+  dplyr::rename("chr" = "seqid", "target_coord" = "spliced_with_coord", "C1_coord" = "C1_A", "C2_coord" = "C2_A") %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         C1_1 = as.numeric(str_extract(C1_coord, "[0-9]+(?=-)")),
+         C1_2 = as.numeric(str_extract(C1_coord, "(?<=-)[0-9]+")),
+         C2_1 = as.numeric(str_extract(C2_coord, "[0-9]+(?=-)")),
+         C2_2 = as.numeric(str_extract(C2_coord, "(?<=-)[0-9]+")),
+         target_1 = as.numeric(str_extract(target_coord, "[0-9]+(?=-)")),
+         target_2 = as.numeric(str_extract(target_coord, "(?<=-)[0-9]+")),
+         event_type = "ES") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                 paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+  target_coord = paste(chr, ":", target_coord, sep = ""),
+  target_start = paste(target_1, sep = ""),
+  target_end = paste(target_2, sep = ""),
+  upstream_start = ifelse(strand == "+", paste(C1_1, sep = ""),
+                                 paste(C2_1, sep = "")),
+  upstream_end = ifelse(strand == "+", paste(C1_2, sep = ""),
+                                 paste(C2_2, sep = "")),
+  downstream_start = ifelse(strand == "+", paste(C2_1, sep = ""),
+                                 paste(C1_1, sep = "")),
+  downstream_end = ifelse(strand == "+", paste(C2_2, sep = ""),
+                                 paste(C1_2, sep = ""))) %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end) 
+
+sig_majiq_se <- read_tsv('data/deltapsi/embryonic_fetal/cassette.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(spliced_with == "A" & `Early-Late_het_wilcoxon` <= 0.05) %>% 
+  group_by(event_id) %>%
+  slice_max(abs(`Early-Late_het_median_dpsi`)) %>%
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_se, by = "event_id") %>% 
+  mutate(event_id = paste(event_id, ";", lsv_id, sep = "")) %>%
+  filter(abs(`Early-Late_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Early-Late_het_median_dpsi") 
+
+
+## intron retention
+
+sig_majiq_ri <- read_tsv('data/deltapsi/embryonic_fetal/alternative_intron.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "C1_C2_intron" | junction_name =="C2_C1_intron" & `Early-Late_het_wilcoxon` <= 0.05 & abs(`Early-Late_het_median_dpsi`) >= 0.2) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, lsv_id, event_id, reference_exon_coord, spliced_with, spliced_with_coord, junction_name,junction_coord, `Early-Late_het_median_dpsi`) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         junct_1 = as.numeric(str_extract(junction_coord, "[0-9]+(?=-)")),
+         junct_2 = as.numeric(str_extract(junction_coord, "(?<=-)[0-9]+")),
+         event_type = "RI") %>%   
+  mutate(spanning_coord = ifelse(strand == "+" & spliced_with == "C2", paste(seqid, ":", ref_1, "-", with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(seqid, ":", with_1, "-", ref_2, sep = ""),
+                                        paste(seqid, ":", ref_1, "-", with_2, sep = "")))),
+         junction_coord = paste(seqid, ":", reference_exon_coord, sep = ""),
+         upstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_1, sep = ""),
+                                        paste(ref_1, sep = "")))),
+         upstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(with_2, sep = ""),
+                                        paste(ref_2, sep = "")))),
+         downstream_start = ifelse(strand == "+" & spliced_with == "C2", paste(with_1, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_1, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_1, sep = ""),
+                                        paste(with_1, sep = "")))),
+         downstream_end = ifelse(strand == "+" & spliced_with == "C2", paste(with_2, sep = ""),
+                                 ifelse(strand == "-" & spliced_with == "C2", paste(ref_2, sep = ""),
+                                 ifelse(strand == "+" & spliced_with == "C1", paste(ref_2, sep = ""),
+                                        paste(with_2, sep = "")))),
+         target_start = paste(as.numeric(upstream_end) + 1, sep = ""),
+         target_end = paste(as.numeric(downstream_start) -1, sep = ""),
+         target_coord = paste(seqid, ":", target_start, "-", target_end, sep = ""),
+         event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::rename("deltaPSI" = "Early-Late_het_median_dpsi", "chr" = "seqid") %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, gene_id, gene_name, event_type, deltaPSI, target_coord, spanning_coord, chr, strand, target_start, target_end, upstream_start, upstream_end, downstream_start, downstream_end) 
+
+
+## alternative 3' prime 
+
+sig_majiq_a3ss <- read_tsv('data/deltapsi/embryonic_fetal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A3SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", with_1, "-", with_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", dist_2, "-", with_2, sep = ""),
+                               paste(seqid, ":", with_1, "-", dist_1, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(dist_2, sep = ""),
+                               paste(with_1, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(dist_1, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(with_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(with_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%                          
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+         
+sig_majiq_a3ss <- read_tsv('data/deltapsi/embryonic_fetal/alt3prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `Early-Late_het_wilcoxon` <= 0.05 & abs(`Early-Late_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a3ss, by = "event_id") %>% 
+  mutate(event_id = paste(event_id,";", lsv_id, sep = "")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Early-Late_het_median_dpsi",
+         "chr" = "seqid")
+
+## alternative 5' prime 
+
+sig_majiq_a5ss <- read_tsv('data/deltapsi/embryonic_fetal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  dplyr::select(gene_id, gene_name, seqid, strand, event_id, reference_exon_coord, spliced_with_coord, junction_name, junction_coord) %>% 
+  pivot_wider(names_from = junction_name, values_from = c(junction_coord)) %>% 
+  mutate(gene_id = str_extract(gene_id, "^[^.]+"),
+         ref_1 = as.numeric(str_extract(reference_exon_coord, "[0-9]+(?=-)")),
+         ref_2 = as.numeric(str_extract(reference_exon_coord, "(?<=-)[0-9]+")),
+         with_1 = as.numeric(str_extract(spliced_with_coord, "[0-9]+(?=-)")),
+         with_2 = as.numeric(str_extract(spliced_with_coord, "(?<=-)[0-9]+")),
+         prox_1 = as.numeric(str_extract(Proximal, "[0-9]+(?=-)")),
+         prox_2 = as.numeric(str_extract(Proximal, "(?<=-)[0-9]+")),
+         dist_1 = as.numeric(str_extract(Distal, "[0-9]+(?=-)")),
+         dist_2 = as.numeric(str_extract(Distal, "(?<=-)[0-9]+")),         
+         event_type = "A5SS") %>% 
+  mutate(spanning_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", ref_2, sep = ""),
+                                 paste(seqid, ":", with_1, "-", with_2, sep = "")),
+         target_coord = ifelse(strand == "+", paste(seqid, ":", ref_1, "-", dist_1, sep = ""),
+                               paste(seqid, ":", dist_2, "-", with_2, sep = "")),
+         target_short_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(dist_2, sep = "")),
+         target_short_end = ifelse(strand == "+", paste(dist_1, sep = ""),
+                               paste(with_2, sep = "")),
+         target_long_start = ifelse(strand == "+", paste(ref_1, sep = ""),
+                               paste(with_1, sep = "")),
+         target_long_end = ifelse(strand == "+", paste(ref_2, sep = ""),
+                               paste(with_2, sep = ""))) %>%     
+  dplyr::select(event_id, gene_id, gene_name, event_type, target_coord, spanning_coord, seqid, strand, target_short_start, target_short_end, target_long_start, target_long_end)
+
+sig_majiq_a5ss <- read_tsv('data/deltapsi/embryonic_fetal/alt5prime.tsv', comment = "#") %>% 
+  group_by(event_id) %>% 
+  filter(junction_name == "Distal" & `Early-Late_het_wilcoxon` <= 0.05 & abs(`Early-Late_het_median_dpsi`) >= 0.2) %>% 
+  ungroup() %>% 
+  dplyr::select(event_id, lsv_id, contains("dpsi")) %>% 
+  left_join(., sig_majiq_a5ss, by = "event_id") %>% 
+  mutate(event_id = paste(event_id, ";", lsv_id, sep = "")) %>% 
+  dplyr::select(-lsv_id) %>% 
+  dplyr::rename("deltaPSI" = "Early-Late_het_median_dpsi",
+                "chr" = "seqid")
+
+sig_majiq <- rbind(sig_majiq_se %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type"),
+                   sig_majiq_ri %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type"),
+                   sig_majiq_a5ss %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type"),
+                   sig_majiq_a3ss %>% dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type")) %>% 
+  mutate(protein_coding = ifelse(gene_id %in% protein_coding_id, "Yes", "No"))
+
+write.table(sig_majiq, "results/splicing/differential_splicing/all_sig_majiq_prenatal.tsv", row.names = F, sep = "\t", quote = F)
+
+
+## vast-tools ####
+
+sig_vast <- read.table("data/deltapsi/embryonic_fetal/early_late.tab", header = T, sep = "\t") %>% 
+    filter(MV.dPsi._at_0.9 > 0 & abs(E.dPsi.) >= 0.2 & EVENT %in% rownames(psi_vastools_all)) %>%
+    dplyr::select(EVENT, E.dPsi.) %>%
+    left_join(., vast_events_coords, by = "EVENT") %>%
+    mutate(event_type = sub("^Hsa(.+?)\\d.*$", "\\1", EVENT),
+           event_type = gsub("EX", "ES", event_type),
+           event_type = gsub("INT", "RI", event_type),
+           event_type = gsub("ALTA", "A3SS", event_type),
+           event_type = gsub("ALTD", "A5SS", event_type),
+           chr = sub(":.*", "", FULL_CO),
+           FULL_CO = sub("^[^:]*:", "", FULL_CO),
+           CO_C1 = sub("^[^:]*:", "", CO_C1),    
+           CO_A = sub("^[^:]*:", "", CO_A),       
+           CO_C2 = sub("^[^:]*:", "", CO_C2),
+           C1_1 = as.numeric(str_extract(CO_C1, "[0-9]+(?=-)")),
+           C1_2 = as.numeric(str_extract(CO_C1, "(?<=-)[0-9]+")),
+           A_1 = as.numeric(str_extract(CO_A, "[0-9]+(?=-)")),
+           A_2 = as.numeric(str_extract(CO_A, "(?<=-)[0-9]+")),
+           C2_1 = as.numeric(str_extract(CO_C2, "[0-9]+(?=-)")),
+           C2_2 = as.numeric(str_extract(CO_C2, "(?<=-)[0-9]+")),
+           target_coord = paste(chr, ":", A_1, "-", A_2, sep = ""),
+           spanning_coord = ifelse(STRAND == "+", paste(chr, ":", C1_1, "-", C2_2, sep = ""),
+                                   paste(chr, ":", C2_1, "-", C1_2, sep = "")),
+           tmp_C1_1 = ifelse(STRAND == "+", C1_1, C2_1),
+           tmp_C1_2 = ifelse(STRAND == "+", C1_2, C2_2),
+           tmp_C2_1 = ifelse(STRAND == "+", C2_1, C1_1),
+           tmp_C2_2 = ifelse(STRAND == "+", C2_2, C1_2),
+           C1_1 = ifelse(STRAND == "+", paste(C1_1), paste(tmp_C1_1)),
+           C1_2 = ifelse(STRAND == "+", paste(C1_2), paste(tmp_C1_2)),
+           C2_1 = ifelse(STRAND == "+", paste(C2_1), paste(tmp_C2_1)),
+           C2_2 = ifelse(STRAND == "+", paste(C2_2), paste(tmp_C2_2)),
+           protein_coding = ifelse(GeneID %in% protein_coding_id, "Yes", "No")) %>%
+    dplyr::rename("event_id" = "EVENT", "gene_id" = "GeneID", "gene_name" = "GENE", 
+                  "strand" = "STRAND", "deltaPSI" = "E.dPsi.", "target_start" = "A_1", 
+                  "target_end" = "A_2", "upstream_start" = "C1_1", 
+                  "upstream_end" ="C1_2", "downstream_start" = "C2_1", 
+                  "downstream_end" = "C2_2") %>% 
+    dplyr::select("event_id", "gene_id", "gene_name", "strand", "target_coord", "spanning_coord", "deltaPSI", "event_type", protein_coding)
+
+write.table(sig_vast, "results/splicing/differential_splicing/all_sig_vast_prenatal.tsv", row.names = F, sep = "\t", quote = F)
+
+```
+
+```{r process sig results}
+library("org.Hs.eg.db")
+
+## merge results from all tolls and add gene panel info ####
+
+all_sig_events_prenatal <- rbind(sig_rmats, sig_majiq, sig_vast) %>%
+  filter(protein_coding == "Yes") %>% 
+  mutate(panel = case_when(
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$CM_enriched, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "CM_enriched", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$sarcomeric, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "sarcomeric", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$ion_channels, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "ion_channels", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$RBPs, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "RBPs", 
+    gene_id %in% mapIds(org.Hs.eg.db, keys = gene_panels$cardiac_SFs, column = "ENSEMBL", keytype = "SYMBOL", multiVals = "first") ~ "cardiac_SF", 
+    TRUE ~ NA), 
+        full_coord = paste(target_coord, ";", spanning_coord, sep = ""),
+    direction = ifelse(deltaPSI > 0, "up", ifelse(deltaPSI < 0, "down", "unchanged"))) %>% 
+  dplyr::select(gene_name, gene_id, panel, strand, target_coord, spanning_coord, deltaPSI, direction, event_type, panel, event_id, full_coord) %>%
+  arrange(gene_name, target_coord, spanning_coord)
+
+write.table(all_sig_events_prenatal, "results/splicing/differential_splicing/all_sig_events_prenatal.tsv", row.names = F, sep = "\t", quote = F)
+
+## summarize events for supplementary
+all_sig_events_supp <- all_sig_events_prenatal %>% 
+  group_by(full_coord) %>% 
+  distinct(full_coord, .keep_all = TRUE) %>%  
+  slice_max(order_by = abs(deltaPSI)) %>%     
+  slice_head(n = 1) %>%  # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+  ungroup() %>% 
+  dplyr::select(gene_name, gene_id, target_coord, spanning_coord, event_type, deltaPSI, direction) %>% 
+  arrange(gene_name, target_coord, spanning_coord) 
+
+write.table(all_sig_events_supp, "results/splicing/differential_splicing/all_sig_events_prenatal_supplementary.tsv", row.names = F, sep = "\t", quote = F)  
+
+## calculate median PSI per stage for all events ####
+median_psi_data <- psi_all_tools_prenatal[rownames(psi_all_tools_prenatal) %in% all_sig_events_prenatal$event_id,] %>% 
+  as_tibble(rownames = "event_id") %>%
+  pivot_longer(!event_id, names_to = "sample", values_to = "PSI") %>%
+  left_join(all_sig_events_prenatal, by = "event_id") %>%
+  mutate(
+    stage = rep(coldata_prenatal$Stage, times = length(rownames(.))/11),
+    stage = factor(stage, levels = unique(stage)),
+    PSI = as.numeric(PSI)) %>%
+  calculate_median_psi_all() 
+
+# merge with events info
+all_sig_events_prenatal <- all_sig_events_prenatal %>%
+  left_join(median_psi_data, by = "event_id")
+
+write.table(all_sig_events_prenatal, "results/splicing/differential_splicing/all_sig_events_prenatal.tsv", row.names = F, sep = "\t", quote = F)  
+
+```
+
+```{r heatmap }
+library("pheatmap")
+library("RColorBrewer")
+library("cowplot")
+
+## Exon Skipping ####
+
+se <- all_sig_events_prenatal %>% 
+  filter(event_type == "ES") 
+input_heat_se <- psi_all_tools_prenatal[rownames(psi_all_tools_prenatal) %in% se$event_id, ]
+input_heat_se[is.na(input_heat_se)] = 0
+
+set.seed(1)
+heat_se <- pheatmap(input_heat_se,
+         scale = "row",
+         clustering_distance_rows = as.dist(1 - cor(t(input_heat_se), method = "spearman")),
+         color = colorRampPalette(rev(brewer.pal(n = 10, name = "RdYlBu")))(100), 
+         border_color = NA,
+         show_rownames = FALSE, 
+         show_colnames = TRUE, 
+         clustering_method = "complete",
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE,
+         na_col = "grey90",
+         annotation_col = coldata_prenatal %>% dplyr::select ("Stage"), 
+         annotation_colors = list(Stage = c("Embryonic" = "#7CBFE7", "Fetal" = "#045381", "iPSC-CM" = "#E8401B")),
+         treeheight_row = 0,
+         cutree_rows = 2,
+         labels_col = c(rep("iPSC-CM", 3), rep("Embryo_4w", 2), rep("Embryo_5w", 2), rep("Embryo_6w", 2), rep("Fetus_18w", 1), rep("Fetus_19w", 3)),
+         legend = T)
+heat_se
+save_plot(plot = heat_se, filename = "results/splicing/differential_splicing/heatmap_SE_spearman_complete_prenatal.png", base_height = 6, base_width = 9)
+
+
+## Intron Retention ####
+
+ri <- all_sig_events_prenatal %>% 
+  filter(event_type == "RI") 
+input_heat_ri <- psi_all_tools_prenatal[rownames(psi_all_tools_prenatal) %in% ri$event_id, ]
+input_heat_ri[is.na(input_heat_ri)] = 0
+
+set.seed(1)
+heat_ri <- pheatmap(input_heat_ri,
+         scale = "row",
+         clustering_distance_rows = as.dist(1 - cor(t(input_heat_ri), method = "spearman")),
+         color = colorRampPalette(rev(brewer.pal(n = 10, name = "RdYlBu")))(100), 
+         border_color = NA,
+         show_rownames = FALSE, 
+         show_colnames = TRUE, 
+         clustering_method = "complete",
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE,
+         na_col = "grey90",
+         annotation_col = coldata_prenatal %>% dplyr::select ("Stage"), 
+         annotation_colors = list(Stage = c("iPSC-CM" = "#E8401B", "Embryonic" = "#7CBFE7", "Fetal" = "#045381")),
+         treeheight_row = 0,
+         cutree_rows = 2,
+         labels_col = c(rep("iPSC-CM", 3), rep("Embryo_4w", 2), rep("Embryo_5w", 2), rep("Embryo_6w", 2), rep("Fetus_18w", 1), rep("Fetus_19w", 3)),
+         legend = T)
+heat_ri
+save_plot(plot = heat_ri, filename = "results/splicing/differential_splicing/heatmap_RI_spearman_complete_prenatal.png", base_height = 6, base_width = 9)
+
+```
+
+```{r NEASE}
+
+events <- all_sig_events_prenatal %>% 
+              filter(event_type == "ES") %>% 
+              group_by(full_coord) %>% 
+              distinct(full_coord, .keep_all = TRUE) %>% 
+              slice_max(order_by = abs(deltaPSI)) %>%  # when same event is detected by different tools, choose that with the highest deltaPSI
+              slice_head(n = 1) %>% # when more than 1 event has the same highest abs(deltaPSI), keep the first one
+              ungroup() %>%
+              unique() %>% 
+              separate(target_coord, into = c("chr", "start", "end"), sep = "[:-]") %>% 
+              dplyr::select(gene_id, start, end, deltaPSI)
+write.table(events, "results/splicing/nease/prenatal/nease_se_prenatal.tsv", row.names = F, quote = F, sep = "\t")  
+
+
+generate_nease_plot("results/splicing/nease/prenatal/nease_enr_Reactome.csv")
+ggsave(last_plot(), filename = "nease_pathways_prenatal.pdf", path = "results/splicing/nease/prenatal", width = 8, height = 4)
+
+```
+
+```{r plot individual events}
+
+events <- all_sig_events_prenatal %>% 
+  dplyr::select(gene_name, event_id, target_coord) 
+
+psi_long_prenatal <- psi_all_tools_prenatal[rownames(psi_all_tools_prenatal) %in% events$event_id,] %>% 
+  as_tibble(rownames = "event_id") %>% 
+  pivot_longer(!event_id, names_to = "sample", values_to = "PSI") %>% 
+  left_join(., events, by = "event_id") %>% 
+  dplyr::select(gene_name, event_id, target_coord, sample, PSI) %>% 
+  mutate(stage = rep(coldata_prenatal %>% pull("Stage"), times = length(rownames(.))/11),
+         stage = factor(stage, levels = unique(coldata_prenatal %>% pull("Stage"))),
+         age = rep(coldata_prenatal %>% pull("Groups"), times = length(rownames(.))/11),
+         age = factor(age, levels = unique(coldata_prenatal %>% pull("Groups"))),
+         PSI = as.numeric(PSI))
+
+
+## plot specific events per stage ####
+
+plot_psi_by_event_id_per_stage <- function(df, event, include_cm = FALSE) {
+  
+  filtered_data <- df %>% filter(event_id == event)
+  
+  if (include_cm) {
+  filtered_data <- filtered_data}
+  else {filtered_data <- filtered_data %>% filter(!age %in% c("iPSC-CM"))}
+  
+  color_values <- if (include_cm) {
+    c("#E8401B", "#7CBFE7","#045381")}
+  else {c("#7CBFE7","#045381")}
+  
+  temp_plot <- ggplot(filtered_data, aes(x = stage, y = PSI)) +
+    geom_jitter(aes(colour = age), width = 0.1, size = 4) + 
+    stat_summary(fun = "median", geom = "crossbar", linewidth = .4, color = "#BEBBC1") +
+    theme_light(base_size = 15) + 
+    ggtitle(unique(filtered_data$gene_name), subtitle = unique(filtered_data$target_coord)) + 
+    theme(
+      plot.title = element_text(size = 14, face = "bold.italic", hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.title.x = element_blank(),
+      axis.text.y = element_text(size = 8, face = "bold"),
+      axis.text.x = element_text(size = 8.5, face = "bold"),
+      legend.position = "none") +
+    expand_limits(y = c(0, 1)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_color_manual(values = color_values) +
+    ylab("PSI (Percentage Spliced In)") +
+    labs(color = "Age") 
+  
+  print(temp_plot)
+  
+  file_name <- paste0("plot_", unique(filtered_data$gene_name), "_", unique(filtered_data$event_id), if (include_cm) "_stage_with_cm" else "_stage", ".pdf")
+  ggsave(temp_plot, filename = file_name, path = "results/splicing/scatterplots_prenatal", width = 2.8, height = 2.8, units = "in")
+}
+
+plot_psi_by_event_id_per_stage(psi_long, "chrX:-:139731651-139731755:139726348-139728962:139737916-139738069", include_cm = FALSE) 
+plot_psi_by_event_id_per_stage(psi_long, "HsaEX0041047", include_cm = TRUE) 
+plot_psi_by_event_id_per_stage(psi_long, "chr10:-:60196145-60196243:60186715-60186912:60196527-60196625", include_cm = TRUE) 
+plot_psi_by_event_id_per_stage(psi_long, "chr1:+:39465095-39465112:39463612-39463686:39468615-39468732", include_cm = TRUE) 
+plot_psi_by_event_id_per_stage(psi_long, "chr1:+:39469547-39469615:39468615-39468732:39479798-39479994", include_cm = TRUE) 
+
+```
+
+
+
+
+
+
+
