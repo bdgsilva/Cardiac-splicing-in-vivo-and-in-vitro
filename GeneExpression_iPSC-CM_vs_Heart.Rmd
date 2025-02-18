@@ -11,7 +11,7 @@ output:
 
 knitr::opts_chunk$set(echo = TRUE)
 library("rmarkdown")
-knitr::opts_knit$set(root.dir = "~/Documents/GitHub/Transcriptomic-analysis-of-cardiac-development-in-vivo-and-in-vitro/")  # set working directory
+knitr::opts_knit$set(root.dir = "~/Documents/GitHub/Cardiac-splicing-in-vivo-and-in-vitro/")  # set working directory
 
 ```
 
