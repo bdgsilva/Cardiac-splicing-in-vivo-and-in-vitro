@@ -1,0 +1,385 @@
+---
+title: "GeneExpression_iPSC-CM_vs_Heart"
+author: "Beatriz Gomes-Silva"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library("rmarkdown")
+knitr::opts_knit$set(root.dir = "~/Documents/GitHub/Transcriptomic-analysis-of-cardiac-development-in-vivo-and-in-vitro/")  # set working directory
+
+```
+
+```{r import data}
+library("GenomicFeatures")
+library("tximport")
+library("tidyverse")
+
+# import annotation
+gtf <- "data/gencode.v45.primary_assembly.annotation.gtf"
+txdb <- makeTxDbFromGFF(gtf)
+tx2gene <- AnnotationDbi::select(txdb, keys = keys(txdb, keytype = "TXNAME"), "GENEID", "TXNAME")
+c <- cbind(gsub("\\..*", "", tx2gene[, 1]), gsub("\\..*", "", tx2gene[, 2])) # remove decimals of gene ID version
+colnames(c) = colnames(tx2gene)
+tx2gene <- as.data.frame(c)
+
+# import protein coding genes
+protein_coding_id <- read.table("data/protein_coding_genes_id.txt")$V1
+
+# import metadata
+coldata <- read.table("data/coldata_input.csv", header = TRUE, row.names = 1, sep = ";") 
+
+# import salmon files
+files <- file.path("data", "salmon", rownames(coldata), "quant.sf")
+all(file.exists(files))
+names(files) <- gsub(".*/([^/]+)/([^/]+)$", "\\1", files)
+files <- files[rownames(coldata)]       #reorder sample order according to coldata
+gene_level <- tximport(files, type = "salmon", tx2gene = tx2gene, ignoreTxVersion = TRUE)
+id_to_sample <- setNames(coldata$Groups, rownames(coldata))
+
+```
+
+```{r gene expression }
+library("DESeq2") 
+library("org.Hs.eg.db")
+
+dds <- DESeqDataSetFromTximport(gene_level, coldata, ~ Sex + Stage)
+dds <- dds[rowSums(counts(dds) >= 10) >= 3, ] # filter for genes with at least 10 reads in a minimum of 3 samples
+dds <- estimateSizeFactors(dds)
+dds <- dds[rownames(dds) %in% protein_coding_id, ] # filter for protein coding genes 
+
+# extract raw counts 
+# raw_counts <- counts(dds, normalized = FALSE) # read counts normalized for sequencing depth
+# write.table(raw_counts, "results/gene_expression/raw_counts.tsv", quote = F, sep = "\t", row.names = T)
+
+# extract TPM
+tpm <- gene_level$abundance %>% as.data.frame()
+# write.table(tpm, "results/gene_expression/tpm.tsv", quote = F, sep = "\t", row.names = T)
+
+# extract normalized counts 
+normalized_counts <- counts(dds, normalized = TRUE) # read counts normalized for sequencing depth
+# write.table(normalized_counts, "results/gene_expression/normalized_counts.tsv", quote = F, sep = "\t", row.names = T)
+
+norm_counts_long <- normalized_counts %>% 
+  as_tibble(rownames = "gene_id") %>% 
+  pivot_longer(!gene_id, names_to = "sample", values_to = "expression") %>% 
+  mutate(gene_symbol = mapIds(org.Hs.eg.db, keys = gene_id, column = "SYMBOL", keytype = "ENSEMBL"),
+         stage = rep(coldata$Stage, times = length(rownames(.))/53),
+         stage = gsub("iPSC", "iPSC-CM", stage),
+         stage = gsub("Prenatal", "Prenatal\nHeart", stage),
+         stage = gsub("Postnatal", "Postnatal\nHeart", stage),
+         stage = factor(stage, levels = unique(stage)),
+         groups = rep(coldata$Groups, times = length(rownames(.))/53),
+         groups = factor(groups, levels = unique(groups)))
+
+```
+
+```{r correlation }
+library("corrplot")
+
+# extract TPM
+tpm <- tpm[rowSums((tpm) > 0) >= 1, ] # remove genes with TPM 0 in all samples
+tpm <- tpm[rownames(tpm) %in% protein_coding_id, ] # keep only protein coding genes
+
+# analyze histogram of log10-transformed TPM values
+ggplot(log10(tpm)) + geom_histogram(aes(x = iPSC_D)) 
+ggplot(log10(tpm)) + geom_histogram(aes(x = iPSC_G)) 
+ggplot(log10(tpm)) + geom_histogram(aes(x = iPSC_T)) 
+
+# filter expressed genes
+# keep genes with TPM > 1 in at least 1 of the samples (TPM at which distribution of counts becomes close to normal)
+tpm_filt <- tpm[rowSums((tpm) >= 1 ) >= 1, ]  
+        
+# analyze histogram of log10-transformed TPM values after filtering
+ggplot(log10(tpm_filt)) + geom_histogram(aes(x = iPSC_D)) 
+ggplot(log10(tpm_filt)) + geom_histogram(aes(x = iPSC_G)) 
+ggplot(log10(tpm_filt)) + geom_histogram(aes(x = iPSC_T)) 
+
+dds_corr <- dds[rownames(dds) %in% rownames(tpm_filt), ] # filter for expressed genes
+
+# rlog transformation
+rlog_corr <- data.frame(assay(rlog(dds_corr, blind = TRUE)))
+rlog_corr <- rlog_corr %>% dplyr::select("iPSC_D", "iPSC_G", "iPSC_T", "ERR2598167", "ERR2598168")
+
+png("results/gene_expression/iPSC/pearson_corr_matrix.png", width = 9, height = 6, units = "in", res = 300)
+corrplot(round(cor(rlog_corr), 2), 
+         method = "circle", 
+         tl.col = "black", 
+         tl.srt = 45,
+         col = "grey",
+         addCoef.col = "black", 
+         cl.pos = "n",
+         order = "FPC", 
+         type = "upper")
+dev.off()
+
+```
+
+```{r venn diagram, echo = FALSE}
+library("VennDiagram")
+library("cowplot")
+
+venn <- venn.diagram(list(iPSC_D = rownames(subset(tpm_filt, iPSC_D > 1)), 
+                            iPSC_G = rownames(subset(tpm_filt, iPSC_G > 1)), 
+                            iPSC_T = rownames(subset(tpm_filt, iPSC_T > 1))),
+        category.names = c("iPSC_D", "iPSC_G", "iPSC_T"), 
+        filename = NULL, lwd = 2, 
+        lty = "blank",
+        fill=c("#DFCEF3","#FFC8A3","#BCEFD9"), 
+        cex = 1.5, 
+        fontface = "bold",
+        fontfamily = "sans", 
+        cat.cex = 1.7, 
+        cat.fontface = "bold", 
+        cat.fontfamily = "sans")
+save_plot(plot = venn, filename = "results/gene_expression/iPSC/venn_ipsc.png", base_height = 6, base_width = 6)
+
+```
+
+```{r CIBERSORTx}
+
+### Cell type proportions
+
+prop_cui <- read.table("data/cibersortx/CIBERSORTx_Adjusted_Cui.txt", sep = "\t", header = T, row.names = 1)  %>% 
+  dplyr::select(-c("P.value", "Correlation", "RMSE")) 
+colnames(prop_cui)
+colnames(prop_cui) <- c("CM", "CM_5w", "Macrophage", "Endothelial", "Fibroblast_like", "Valvar_cell", "B/T_cell", "Mast_cell", "Epicardial")
+prop_cui <- prop_cui %>% 
+  mutate(CM_all = CM_5w + CM) %>% 
+  dplyr::select(-c("CM", "CM_5w"))
+prop_cui <- prop_cui[match(rownames(coldata), rownames(prop_cui)), ] # reorder samples based on developmental time
+
+# Heatmap
+library("pheatmap")
+library("RColorBrewer")
+
+heatmap_prop <- function(df) {
+  heat <- pheatmap(df, 
+         color = colorRampPalette(brewer.pal(n = 9, name = "Reds"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_colnames = TRUE, 
+         show_rownames = TRUE,
+         annotation_row = coldata %>% dplyr::select("Stage"), 
+         annotation_colors = list(Stage = c(iPSC = "#DC533C", Prenatal = "#278BAE", Postnatal = "#3DAB3E")),
+         labels_row = c(rep("iPSC-CM", 3), rep("Embryo_4w", 2), rep("fetal_5w", 2), rep("fetal_6w", 2), rep("fetal_7w", 3), rep("fetal_8w", 5), rep("fetal_9w", 3), rep("fetal_10w", 4), rep("fetal_11w", 4), rep("fetal_12w", 2), rep("fetal_13w", 4), rep("fetal_16w", 3), rep("fetal_18w", 1), rep("fetal_19w", 3), rep("neonatal", 1), rep("neonatal", 1), rep("baby", 1), rep("baby", 1), rep("baby", 2), rep("baby", 1), rep("child", 1), rep("child", 1), rep("adult", 1), rep("adult", 1), rep("adult", 1)),
+         main = "Cell Type Proportions per Sample")
+  return(heat)
+}
+
+save_plot(plot = heatmap_prop(prop_cui), filename = "results/gene_expression/deconvolution/prop_cell_type_per_sample_heatmap_Cui.pdf", base_height = 10, base_width = 5)
+
+```
+
+```{r Principal Component Analysis}
+
+pca_plot <- function(pc_x, pc_y) {
+  vst_data <- assay(vst(dds, blind = TRUE)) # variance-stabilizing transformation
+  rv <- rowVars(vst_data, useNames = TRUE) # calculate row variances
+  select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]  # select top 500 most variable genes
+  pca <- prcomp(t(vst_data[select, ]), center = TRUE, scale = FALSE) # transpose the matrix so that rows = samples and columns = variables and perform PCA on selected genes
+  percentVar <- pca$sdev^2 / sum(pca$sdev^2) # calculate the percentage of variance explained by each PC
+  
+  # create PCA matrix with metadata
+  pca_matrix <- as.data.frame(pca$x) %>%
+    mutate(Age = coldata$Groups,
+           Age = factor(Age, levels = unique(Age)),
+           Stage = coldata$Stage,
+           Stage = factor(Stage, levels = unique(Stage)),
+           Sex = coldata$Sex)
+  
+  # plot PCA
+  pca_plot <- ggplot(pca_matrix,
+                     aes_string(x = pc_x, y = pc_y, color = "Age", fill = "Age", shape = "Stage")) + 
+    geom_point(size = 5, alpha = 0.9) + 
+    xlab(paste0(pc_x, ": ", round(percentVar[as.numeric(gsub("PC", "", pc_x))] * 100), "% variance")) + 
+    ylab(paste0(pc_y, ": ", round(percentVar[as.numeric(gsub("PC", "", pc_y))] * 100), "% variance")) + 
+    coord_fixed() + 
+    theme(legend.title = element_blank(), 
+          text = element_text(size = 14),
+          legend.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          axis.title.x = element_text(color = "black", size = 16), 
+          axis.title.y = element_text(color = "black", size = 16), 
+          axis.text.x = element_text(size = 14), 
+          axis.text.y = element_text(size = 14)) + 
+    scale_color_manual(values = c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9", "#045381", "#A3E587", "#76CE50", "#70BD4F", "#0A8724")) +
+    scale_fill_manual(values = c(c("#E8401B", "#BCE6FF", "#7CBFE7", "#2983B9","#045381","#A3E587","#76CE50","#70BD4F","#0A8724"))) +
+    scale_shape_manual(values = c(16, 25, 24))
+  
+  ggsave(pca_plot, filename = paste0(pc_x, "_", pc_y, ".pdf"), 
+         path = "results/gene_expression/pca", 
+         width = 7, height = 10, units = "in")
+  
+  return(pca_plot)
+}
+
+### PC1 vs PC2 - developmental stage
+pca_plot("PC1", "PC2")
+
+
+# plot PCA of cell proportions
+pca_plot_cibersort <- function(pc_x, pc_y, prop, filename) {
+  vst_data <- assay(vst(dds, blind = TRUE)) # variance-stabilizing transformation
+  rv <- rowVars(vst_data, useNames = TRUE) # calculate row variances
+  select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]  # select top 500 most variable genes
+  pca <- prcomp(t(vst_data[select, ]), center = TRUE, scale = FALSE) # transpose the matrix so that rows = samples and columns = variables and perform PCA on selected genes
+  percentVar <- pca$sdev^2 / sum(pca$sdev^2) # calculate the percentage of variance explained by each PC
+  
+  # create PCA matrix with metadata
+  pca_matrix <- as.data.frame(pca$x) %>%
+    mutate(Age = coldata$Groups,
+           Age = factor(Age, levels = unique(Age)),
+           Stage = coldata$Stage,
+           Stage = factor(Stage, levels = unique(Stage)),
+           Sex = coldata$Sex,
+           cm_all_cui = prop_cui$CM_all,
+           fb_cui = prop_cui$Fibroblast_like,
+           cm_wang = prop_wang$Cardiomyocytes)
+  
+  # plot PCA
+  pca_plot <- ggplot(pca_matrix,
+                     aes_string(x = pc_x, y = pc_y, color = prop, shape = "Stage")) + 
+    geom_point(size = 5, alpha = 0.9) + 
+    xlab(paste0(pc_x, ": ", round(percentVar[as.numeric(gsub("PC", "", pc_x))] * 100), "% variance")) + 
+    ylab(paste0(pc_y, ": ", round(percentVar[as.numeric(gsub("PC", "", pc_y))] * 100), "% variance")) + 
+    coord_fixed() + 
+    theme(legend.title = element_blank(), 
+          text = element_text(size = 14),
+          legend.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          axis.title.x = element_text(color = "black", size = 16), 
+          axis.title.y = element_text(color = "black", size = 16), 
+          axis.text.x = element_text(size = 14), 
+          axis.text.y = element_text(size = 14)) + 
+    scale_colour_gradient(low = "white", high = "red") +
+    scale_shape_manual(values = c(17, 16, 16))
+  
+  ggsave(pca_plot, filename = paste0(pc_x, "_", pc_y, "_", filename, ".pdf"), 
+         path = "results/gene_expression/pca", 
+         width = 7, height = 10, units = "in")
+  
+  return(pca_plot)
+}
+
+# PC1 vs PC2 - developmental stage
+pca_plot_cibersort("PC1", "PC2", "cm_all_cui", "CM_all_Cui")
+pca_plot_cibersort("PC1", "PC2", "cm_wang", "CM_Wang")
+
+```
+
+```{r dendrogram}
+
+vst <- assay(vst(dds, blind = TRUE))
+colnames(vst) <- id_to_sample[colnames(vst)]
+plot(hclust(as.dist(1 - cor(vst, method = "pearson")), method = "average"), hang = -1, cex = 1)
+
+
+# hierarchical clustering with bootstrapping
+library("pvclust") 
+
+spearman <- function(x, ...) {
+  x <- as.matrix(x)
+  res <- as.dist(1 - cor(x, method = "spearman", use = "everything"))    
+  res <- as.dist(res)
+  attr(res, "method") <- "spearman"
+  return(res)
+}
+
+pv <- pvclust(assay(vst(dds, blind = TRUE)),
+              method.dist = spearman, 
+              method.hclust = "average", 
+              nboot = 1000, 
+              use.cor = "pairwise.complete.obs")
+plot(pv, hang = -1, cex = 1)
+
+```
+
+```{r differential gene expression}
+
+### Prenatal Heart vs Postnatal Heart ####
+
+dds$Stage <- relevel(dds$Stage, ref = "Prenatal")
+dds <- DESeq(dds)
+res_FetvsAd <- results(dds, contrast = c("Stage", "Postnatal", "Prenatal"), alpha = 0.01, lfcThreshold = 1)
+resultsNames(dds)
+res_FetvsAd <- lfcShrink(dds, coef = "Stage_Postnatal_vs_Prenatal", type = "apeglm", res = res_FetvsAd)
+summary(res_FetvsAd)
+
+res_FetvsAd <- res_FetvsAd %>% 
+  as.data.frame() %>% 
+  mutate(gene_name = mapIds(org.Hs.eg.db, keys = rownames(res_FetvsAd), column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first"),
+         direction = if_else(log2FoldChange > 1 & padj < 0.01, "up",
+                   if_else(log2FoldChange < -1 & padj < 0.01, "down", "NA")))
+
+# filter significantly differentially expressed genes (adjusted p-value <= 0.01, abs(l2fc) >= 1)
+resSig_FetvsAd <- res_FetvsAd %>%
+  rownames_to_column("gene_id") %>% 
+  filter(padj <= 0.01, abs(log2FoldChange) >= 1) %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  mutate(comparison = "prenatal vs postnatal")
+
+
+### iPSC-CM vs Prenatal Heart ####
+
+dds$Stage <- relevel(dds$Stage, ref = "iPSC")
+dds <- DESeq(dds)
+res_iPSCvsFet <- results(dds, contrast = c("Stage", "Prenatal", "iPSC"), alpha = 0.01, lfcThreshold = 1)
+resultsNames(dds)
+res_iPSCvsFet <- lfcShrink(dds, coef="Stage_Prenatal_vs_iPSC", type = "apeglm", res = res_iPSCvsFet)
+summary(res_iPSCvsFet)
+
+res_iPSCvsFet <- res_iPSCvsFet %>% 
+  as.data.frame() %>% 
+  mutate(gene_name = mapIds(org.Hs.eg.db, keys = rownames(res_iPSCvsFet), column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first"),
+         direction = if_else(log2FoldChange > 1 & padj < 0.01, "up",
+                             if_else(log2FoldChange < -1 & padj < 0.01, "down", "NA")))
+
+# filter significantly differentially expressed genes (adjusted p-value <= 0.01, abs(l2fc) >= 1)
+resSig_iPSCvsFet <- res_iPSCvsFet %>%
+  rownames_to_column("gene_id") %>% 
+  filter(padj <= 0.01, abs(log2FoldChange) >= 1) %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  mutate(comparison = "ipsc vs prenatal")
+
+
+### iPSC-CM vs Postnatal Heart ####
+
+dds$Stage <- relevel(dds$Stage, ref = "iPSC")
+dds <- DESeq(dds)
+res_iPSCvsAd <- results(dds, contrast = c("Stage", "Postnatal", "iPSC"), alpha = 0.01, lfcThreshold = 1)
+resultsNames(dds)
+res_iPSCvsAd <- lfcShrink(dds, coef = "Stage_Postnatal_vs_iPSC", type = "apeglm", res = res_iPSCvsAd)
+summary(res_iPSCvsAd)
+
+res_iPSCvsAd <- res_iPSCvsAd %>% 
+  as.data.frame() %>% 
+  mutate(gene_name = mapIds(org.Hs.eg.db, keys = rownames(res_FetvsAd), column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first"),
+         direction = if_else(log2FoldChange > 1 & padj < 0.01, "up",
+                             if_else(log2FoldChange < -1 & padj < 0.01, "down", "NA")))
+
+# filter significantly differentially expressed genes 
+resSig_iPSCvsAd <- res_iPSCvsAd %>%
+  rownames_to_column("gene_id") %>% 
+  filter(padj <= 0.01, abs(log2FoldChange) >= 1) %>%
+  arrange(desc(abs(log2FoldChange))) %>%
+  mutate(comparison = "ipsc vs postnatal")
+
+
+## merge results
+resSig_all <- rbind(resSig_FetvsAd, resSig_iPSCvsAd, resSig_iPSCvsFet) %>% 
+  arrange(gene_name)
+# write.table(resSig_all, "results/gene_expression/dge/resSig_all.csv", quote = F, row.names = F, sep = ",")
+
+```
