@@ -1,0 +1,1399 @@
+---
+title: "single_cell"
+author: "Beatriz Gomes-Silva"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library("rmarkdown")
+knitr::opts_knit$set(root.dir = "~/Documents/GitHub/Cardiac-splicing-in-vivo-and-in-vitro/")  # set working directory
+
+```
+
+###################
+#### iPSC- T ######
+###################
+
+```{r import data}
+library("Matrix")
+library("tidyverse")
+library("org.Hs.eg.db")
+options(future.globals.maxSize = 4000 * 1024^2)
+
+# file with the gene IDs, representing all genes quantified, listed in the order of the rows in the matrix file
+gene_ids <- read.table("data/single_cell/iPSC-T/count_matrix_geneid.genes.txt")$V1
+gene_ids <- gsub("\\..*", "", gene_ids)
+
+# file with the cell IDs, representing all cells quantified, listed in the order of the columns of the matrix file
+cell_ids <- read.table("data/single_cell/iPSC-T/count_matrix_geneid.barcodes.txt")$V1
+
+# matrix of counts per gene for every cell
+counts <- Matrix::readMM("data/single_cell/iPSC-T/count_matrix_geneid.mtx")
+counts <- t(counts)
+rownames(counts) <- gene_ids
+colnames(counts) <- cell_ids
+dim(counts)
+
+```
+
+```{r remove empty droplets}
+library("DropletUtils")
+
+### Detect empty droplets ####
+
+# distinguish between cells and empty droplets (eg: droplets that contain RNA from the ambient solution, resulting in non-zero counts after debarcoding)
+set.seed(100)
+empty_drops <- emptyDrops(counts)  # test each barcode’s expression profile for significant deviation from the ambient profile
+
+# filter cell-containing droplets (those with significant deviations from the ambient profile)
+is.cell <- empty_drops$FDR <= 0.01  # frequency of false positives is specified by FDR
+summary(is.cell, na.rm = TRUE)
+
+# check whether a lower p-value could be obtained by increasing the number of permutations (Limited field). 
+# if FDR > 0.01 and Limited==TRUE, npts should be increased 
+table(Limited = empty_drops$Limited, Significant = is.cell)
+
+# diagnostic plot - total counts vs negative log-probability
+# droplets detected as cells show up with large negative log-probabilities OR very large total counts
+plot(empty_drops$Total, 
+     -empty_drops$LogProb, 
+     col=ifelse(is.cell, "red", "black"),
+     xlab = "Total UMI count",
+     ylab = "-Log Probability")
+
+# subset matrix to cell-containing droplets only
+counts <- counts[, which(is.cell), drop = FALSE]
+dim(counts)
+
+```
+
+```{r create Seurat object & metadata}
+library("Seurat")
+
+assay <- Seurat::CreateAssayObject(counts, assay = "RNA", min.features = 0, min.cells = 0)
+options(Seurat.object.assay.calcn = TRUE) 
+seurat <- Seurat::CreateSeuratObject(assay)
+view(seurat@meta.data)
+  # nCount_RNA - number of UMIs per cell
+  # nFeature_RNA - number of genes detected per cell
+
+# add number of genes per UMI for each cell to the metadata
+# inform on complexity of the dataset (the more genes detected per UMI, the more complex data is)
+seurat$log10GenesPerUMI <- log10(seurat$nFeature_RNA) / log10(seurat$nCount_RNA)
+
+# add percentage of mitochondrial ratio to the metadata
+mito_genes <- read.table("data/single_cell/mito_genes.txt", header = T) %>% pull("gene_id")
+seurat$mitoRatio <- Seurat::PercentageFeatureSet(object = seurat, features = mito_genes) / 100
+
+# add percentage of ribosomal ratio to the metadata
+ribo_genes <- read.table("data/single_cell/ribo_genes.txt", header = T) %>% pull("gene_id")
+ribo_genes <- ribo_genes[ribo_genes %in% rownames(Seurat::GetAssayData(seurat))]
+seurat$riboRatio <- Seurat::PercentageFeatureSet(object = seurat, features = ribo_genes) / 100
+
+# add column with cell ids
+seurat@meta.data$cells <- rownames(seurat@meta.data)
+  view(seurat@meta.data)
+
+```
+
+```{r quality control}
+
+# number of cells counts per sample
+seurat@meta.data %>% 
+  ggplot(aes(x = orig.ident, fill = orig.ident)) + 
+  geom_bar() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), axis.title.x = element_blank(), legend.position = "none") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  ggtitle("NCells")
+ggsave(last_plot(), filename = "QC_number_counts.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 7)
+
+# number UMIs (transcripts) per cell
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = nCount_RNA, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() + 
+  ylab("Cell density") + 
+  geom_vline(xintercept = 1000) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_number_UMI_cell.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+
+# distribution of genes detected per cell 
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = nFeature_RNA, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_distribution_genes_cell.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+
+# distribution of mitochondrial gene expression detected per cell
+# 30% of total mRNA in the heart is mitochondrial due to high energy needs of cardiomyocytes
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = mitoRatio, fill = orig.ident)) +  
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 0.4) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_distribution_mito_cell.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+
+# genes detected vs number of UMIs + mitoRatio
+seurat@meta.data %>% 
+  ggplot(aes(x = nCount_RNA, y = nFeature_RNA, colour = mitoRatio)) + 
+  geom_point() + 
+  scale_colour_gradient(low = "gray90", high = "black") + 
+  stat_smooth(method = lm) + 
+  scale_x_log10() + 
+  scale_y_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 700) + 
+  geom_hline(yintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_genes_UMI_mito.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+
+# complexity of the gene expression (genes detected per UMI)
+seurat@meta.data %>% 
+  ggplot(aes(x = log10GenesPerUMI, colour = orig.ident, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() + 
+  geom_vline(xintercept = 0.8) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_complexity.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+
+# values overall are distributed in the data
+Seurat::VlnPlot(object = seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoRatio", "riboRatio"), ncol = 4)
+ggsave(last_plot(), filename = "QC_overall.pdf", path = "results/single-cell/iPSC-T", width = 7, height = 5)
+
+```
+
+```{r filtering}
+
+### cell-level filtering ##
+  
+# filter low quality reads
+filtered_seurat <- subset(x = seurat, subset = nCount_RNA >= 1000 & nFeature_RNA >= 500 & log10GenesPerUMI > 0.80 & mitoRatio < 0.4 & riboRatio > 0.05)
+  
+filtered_seurat@meta.data %>% 
+  ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) + 
+  geom_point() + 
+  scale_colour_gradient(low = "gray90", high = "black") + 
+  stat_smooth(method=lm) + 
+  scale_x_log10() + 
+  scale_y_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 700) + 
+  geom_hline(yintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_genes_UMI_mito_filtered.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3)
+  
+Seurat::VlnPlot(object = filtered_seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoRatio", "riboRatio"), ncol = 4)
+ggsave(last_plot(), filename = "QC_overall_filtered.pdf", path = "results/single-cell/iPSC-T", width = 7, height = 5)
+
+
+### gene-level filtering ##
+  
+# remove genes that have 0 expression in all cells
+filtered_counts <- Seurat::GetAssayData(object = filtered_seurat, slot = "counts")
+nonzero <- filtered_counts > 0
+
+# keep only those genes expressed in more than 10 cells
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+filtered_counts <- filtered_counts[keep_genes, ]
+  
+# keep only protein-coding genes
+# protein_coding_id <- read.table("data/protein_coding_genes_id.txt")$V1
+# protein_coding <- rownames(filtered_counts) %in% protein_coding_id
+# filtered_counts <- filtered_counts[protein_coding, ]
+
+write.table(filtered_counts, "results/single-cell/iPSC-T/filtered_counts.tsv", quote = F, sep = "\t", row.names = T)
+  
+# subset seurat object to filtered cells and genes
+filtered_seurat <- filtered_seurat[rownames(filtered_seurat) %in% rownames(filtered_counts),]
+
+# check cell cycle for unwanted sources of variation 
+load("data/single_cell/cell_cycle.rda")
+filtered_seurat <- Seurat::CellCycleScoring(filtered_seurat, 
+                                            g2m.features = mapIds(org.Hs.eg.db, keys=g2m_genes, column="ENSEMBL", keytype="SYMBOL"), 
+                                            s.features = mapIds(org.Hs.eg.db, keys=s_genes, column="ENSEMBL", keytype="SYMBOL"))
+view(filtered_seurat@meta.data)
+
+# number of cells in each cell cycle phase 
+as_tibble(filtered_seurat[[]]) %>% ggplot(aes(Phase)) + geom_bar()
+ggsave(last_plot(), filename = "QC_cell_cycle_phase.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 5)
+
+```
+
+```{r normalization, scaling & identification of highly variable genes}
+
+# normalizes the gene expression count for each cell to the total expression, multiplies this by a scale factor
+filtered_seurat <- NormalizeData(object = filtered_seurat, 
+                                 normalization.method = "LogNormalize", 
+                                 scale.factor = 10000)
+
+# calculates the standardized variance of each gene across cells, and picks the top ones
+filtered_seurat <- FindVariableFeatures(object = filtered_seurat, 
+                                        selection.method = "vst", 
+                                        nfeatures = 1000, 
+                                        assay = "RNA")
+
+# scaling gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+filtered_seurat <- ScaleData(filtered_seurat, 
+                             features = VariableFeatures(object = filtered_seurat), 
+                             vars.to.regress = c("nCount_RNA"), # # regresses out unwanted sources of variation 
+                             do.center = T, # shifts the expression of each gene, so that the mean expression across cells is 0 - requirement for PCA
+                             do.scale = T, # scale the expression of each gene, so that the variance across cells is 1
+                             verbose = F)
+  # fits a linear regression model, using the normalized expression level of a gene as the dependent variable, and the variables to be regressed out as the independent variables. residuals of the linear model are then taken as the signals with the linear effect of the considered variables removed
+
+# SCTransform combines normalization, scaling and highly variable feature identification
+# regularized negative binomial regression model to remove the variation due to sequencing depth (nUMIs per cell), while adjusting the variance based on pooling information across genes with similar abundances (log-normalization introduces zero-inflation artifact)
+filtered_seurat <- SCTransform(filtered_seurat, 
+                               do.correct.umi = T, 
+                               vars.to.regress = c("nCount_RNA"),
+                               verbose = F, 
+                               variable.features.rv.th = NULL, 
+                               variable.features.n = 1000, 
+                               seed.use = 1, 
+                               do.scale = FALSE, 
+                               do.center = TRUE)
+# SCT assay: counts = corrected counts, data = log1p(counts), scale.data = pearson residuals
+DefaultAssay(filtered_seurat) = "SCT"
+
+# compare the intersection of highly variable genes given by RNA and SCT 
+length(intersect(VariableFeatures(filtered_seurat, assay = "RNA"), VariableFeatures(filtered_seurat, assay = "SCT")))
+
+```
+
+```{r linear dimensionality reduction}
+
+### PCA ###
+filtered_seurat <- RunPCA(filtered_seurat, 
+                          features = VariableFeatures(object = filtered_seurat), 
+                          seed.use = 12345,
+                          npcs = 50)
+
+DimPlot(filtered_seurat, 
+        reduction = "pca")
+ggsave(last_plot(), filename = "pca.pdf", path = "results/single-cell/iPSC-T/", width = 6, height = 5) 
+
+# gene contributions of each PC 
+PCHeatmap(filtered_seurat, 
+            dims = 1:20, 
+            cells = 500, 
+            balanced = TRUE, 
+            ncol = 3)
+  
+# plot the standard deviations of the principle components - higher-ranked PCs explain more variation in the data 
+# picking the elbow of the curve helps determining the number of PCs to use 
+ElbowPlot(object = filtered_seurat,
+          reduction = "pca") +
+    ggtitle("Number of principle component") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r non-linear dimensionality reduction}
+
+### t-SNE
+filtered_seurat <- RunTSNE(filtered_seurat, 
+                           perplexity = 70, 
+                           dims = 1:5,
+                           seed.use = 12345)
+
+DimPlot(filtered_seurat, 
+        reduction = "tsne")
+ggsave(last_plot(), filename = "tsne.pdf", path = "results/single-cell/iPSC-T/", width = 7, height = 5) 
+
+
+### UMAP
+# distances between cells represent similarity in expression
+# preserves trajectory-like structure better when data contains 'continuum', e.g. the continuous cell state change during development and differentiation 
+filtered_seurat <- RunUMAP(filtered_seurat, 
+                           assay = "SCT", 
+                           dims = 1:5,
+                           seed.use = 12345)
+
+DimPlot(filtered_seurat, 
+        reduction = "umap")
+ggsave(last_plot(), filename = "umap.pdf", path = "results/single-cell/iPSC-T/", width = 7, height = 4) 
+
+
+# plot metrics
+FeaturePlot(filtered_seurat, 
+            reduction = "umap", 
+            features = c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "mitoRatio", "riboRatio"),
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE)
+ggsave(last_plot(), filename = "feature_metrics.pdf", path = "results/single-cell/iPSC-T/", width = 6.4, height = 5.7)
+
+# plot MitoRatio
+FeaturePlot(filtered_seurat, 
+            reduction = "umap", 
+            features = "mitoRatio", 
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE) 
+ggsave(last_plot(), filename = "feature_mitoRatio.pdf", path = "results/single-cell/iPSC-T/", width = 4.5, height = 3)
+
+```
+
+```{r clustering}
+
+filtered_seurat <- FindNeighbors(filtered_seurat, 
+                                 reduction = "pca", 
+                                 dims = 1:5, 
+                                 verbose = F)
+
+filtered_seurat <- FindClusters(filtered_seurat, 
+                                resolution = c(0.01, 0.05, 0.1, 0.15, 0.2, 0.25), 
+                                algorithm = 2)
+
+# UMAP resolution 0.1
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.1"
+DimPlot(filtered_seurat, 
+        reduction = 'umap', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "umap_resolution_01.pdf", path = "results/single-cell/iPSC-T/", width = 5, height = 3.3)
+
+# UMAP resolution 0.01
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.01"
+DimPlot(filtered_seurat, 
+        reduction = 'umap', 
+        cols = c("#FF6F61", "#80B1D3"))
+ggsave(last_plot(), filename = "umap_resolution_001.pdf", path = "results/single-cell/iPSC-T/", width = 5, height = 3.3)
+
+# tSNE resolution 0.1
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.1"
+DimPlot(filtered_seurat, 
+        reduction = 'tsne', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "tsne_resolution_01.pdf", path = "results/single-cell/iPSC-T/", width = 5, height = 3.3)
+
+# tSNE resolution 0.01
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.01"
+DimPlot(filtered_seurat, 
+        reduction = 'tsne', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "tsne_resolution_001.pdf", path = "results/single-cell/iPSC-T/", width = 5, height = 3.3)
+
+# number of cells in each cluster
+table(Idents(filtered_seurat))
+
+# proportion of cells in each cluster
+prop.table(table(Idents(filtered_seurat)))
+
+# extract cell ids of a particular cluster
+cells_cluster0 = WhichCells(filtered_seurat, idents = 0)
+cells_cluster1 = WhichCells(filtered_seurat, idents = 1)
+
+saveRDS(filtered_seurat, "results/single-cell/iPSC-T/filtered_seurat.rds")
+
+```
+
+```{r doublet detection}
+
+# seurat_doublet <- readRDS("results/single-cell/iPSC-T/filtered_seurat.rds") # fully processed seurat object (i.e., after NormalizeData, FindVariableGenes, ScaleData, RunPCA, and RunTSNE have all been run)
+
+library("DoubletFinder")
+options(future.globals.maxSize = 4000 * 1024^2)
+
+# predicts doublets according to each real cell’s proximity in gene expression space to artificial doublets created by averaging the transcriptional profile of randomly chosen cell pairs 
+# 3 - perform PCA and use the PC distance matrix to find each cell's proportion of artificial k nearest neighbors (pANN)
+
+## Parameter selection ####
+# Performs pN-pK parameter sweeps 
+# cell's proportion of artificial k nearest neighbors (pANN) values are computed across variable PC space neighborhood sizes (pK)
+sweep.res.list <- paramSweep(filtered_seurat, 
+                             PCs = 1:5, 
+                             sct = TRUE)    # used SCT transformation during processing
+
+# Summarizes results fromParamSweep, computing the bimodality coefficient across pN and pK parameter space
+sweep.stats <- summarizeSweep(sweep.res.list,
+                              GT = FALSE) # ground truth
+
+# Optimal pK is the max of the bimodality coefficent (BCmvn) distribution 
+ggplot(bcmvn, aes(pK, BCmetric, group = 1)) +
+    geom_point() +
+    geom_line() +
+    theme_minimal() 
+# 0.7
+
+## Homotypic Doublet Classification ####
+
+# Leverages user-provided cell annotations to model the proportion of homotypic doublets
+homotypic.prop <- modelHomotypic(filtered_seurat@meta.data$SCT_snn_res.0.01)
+nExp_poi <- round(0.05 * nrow(filtered_seurat@meta.data))  ## Assuming 5% doublet formation rate
+# ~10000 single cell droplets
+# ~6700 recovered (after filtering)
+nExp_poi.adj <- round(nExp_poi*(1 - homotypic.prop)) # adjusted the expected doublet number to account for homotypic doublets
+
+
+## Run DoubletFinder with varying stringencies ####
+seurat_doublet <- doubletFinder(filtered_seurat,
+                                PCs = 1:5, # number of statistically significant PCs
+                                pN = 0.25, # number of generated artificial doublets, expressed as a proportion of the merged real-artificial data
+                                pK = 0.07, # PC neighborhood size used to compute pANN (predicted doublets), expressed as a proportion of the merged real-artificial data
+                                nExp = nExp_poi.adj, # pANN threshold used to make final doublet/singlet predictions
+                                reuse.pANN = FALSE, 
+                                sct = TRUE)                               
+
+# visualize doublets
+DimPlot(seurat_doublet, reduction = 'umap', group.by = "DF.classifications_0.25_0.07_79") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+ggsave(last_plot(), filename = "seurat_doublets_res001_pK007.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3.3)
+
+# Rename column
+colnames(seurat_doublet@meta.data)[grepl("DF.classifications_0.25_0.07_79", colnames(seurat_doublet@meta.data))] <- "DoubletFinder"
+
+# Subset only singlets
+seurat_singlet <- subset(seurat_doublet, subset = DoubletFinder == "Singlet")
+DimPlot(seurat_singlet, reduction = "umap", cols = c("#FF6F61", "#80B1D3"))
+ggsave(last_plot(), filename = "umap_seurat_singlets.pdf", path = "results/single-cell/iPSC-T", width = 5, height = 3.3)
+
+#save object
+saveRDS(seurat_doublet, file = "results/single-cell/iPSC-T/filtered_seurat_doublet.rds")
+saveRDS(seurat_singlet, file = "results/single-cell/iPSC-T/filtered_seurat_singlet.rds")
+
+```
+
+```{r cluster biomarkers}
+
+annotations <- read.csv("data/single_cell/annotation.txt")
+
+markers <- FindAllMarkers(object = seurat_singlet, 
+                          min.pct = 0.25, 
+                          only.pos = T, 
+                          logfc.threshold = 0.5)
+# min.pct: only test genes that are detected in a minimum fraction of cells in either of the two populations.
+# logfc.threshold: minimum log2 foldchange for average expression of gene in cluster relative to the average expression in all other clusters combined
+
+markers <- markers %>% 
+  mutate(gene_name = mapIds(org.Hs.eg.db, keys = markers$gene, column = "SYMBOL", keytype = "ENSEMBL"),
+         left_join(., unique(annotations[, c("gene_id", "description")]), by = c("gene" = "gene_id"))) %>% 
+  group_by(cluster) %>% 
+  arrange(cluster, desc(avg_log2FC))
+
+# write.table(markers, "results/single-cell/iPSC-T/markers_clusters.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+markers_top <- markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)    
+
+DoHeatmap(object = seurat_singlet, features = markers_top$gene, label = TRUE) + scale_fill_viridis()
+ggsave(last_plot(), filename = "markers_heatmap.pdf", path = "results/single-cell/iPSC-T", width = 15, height = 8)
+
+```
+
+```{r enriched pathways}
+library("clusterProfiler")
+
+swr = function(string, nwrap=20) {
+  paste(strwrap(string, width=nwrap), collapse="\n")
+}
+swr = Vectorize(swr)
+
+## GSEA analysis
+geneList = markers %>% filter(cluster == "0" & p_val_adj <= 0.01) %>% pull(avg_log2FC)
+names(geneList) = as.character(markers %>% filter(cluster == "0" & p_val_adj <= 0.01) %>% pull(gene))
+geneList = sort(geneList, decreasing = TRUE)
+gsea_cluster0 <- gseGO(gene = geneList,
+                       keyType = "ENSEMBL", 
+                       OrgDb = org.Hs.eg.db, 
+                       ont = "BP",
+                       scoreType = "pos") %>% as.data.frame() %>% 
+  arrange(p.adjust) %>% 
+  mutate(cluster = 0)
+write.table(gsea_cluster0, "results/single-cell/iPSC-T/gsea_cluster0_CM.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+geneList = markers %>% filter(cluster == "1" & p_val_adj <= 0.01) %>% pull(avg_log2FC)
+names(geneList) = as.character(markers %>% filter(cluster == "1" & p_val_adj <= 0.01) %>% pull(gene))
+geneList = sort(geneList, decreasing = TRUE)
+gsea_cluster1 <- gseGO(gene = geneList,
+                       keyType = "ENSEMBL", 
+                       OrgDb = org.Hs.eg.db, 
+                       ont = "BP",
+                       scoreType = "pos") %>% as.data.frame() %>% 
+  arrange(p.adjust) %>% 
+  mutate(cluster = 1)
+write.table(gsea_cluster1, "results/single-cell/iPSC-T/gsea_cluster1_Epi.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+
+gsea <- rbind(head(gsea_cluster0, 5), head(gsea_cluster1, 5)) %>% 
+  dplyr::select(Description, p.adjust, cluster, NES, enrichmentScore) %>% 
+  mutate(cluster = as.character(cluster),
+         Description = factor(Description, levels=rev(unique(Description[order(cluster, p.adjust)])), ordered=TRUE))
+write.table(gsea_cluster1, "results/single-cell/iPSC-T/gsea_all.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+ggplot(gsea, aes(x = -log10(p.adjust), y = Description, fill = cluster)) + 
+    geom_bar(stat = "identity",  position = "dodge")  +
+    scale_fill_manual(values = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349")) +
+    xlab("-log10 adjusted p-value") +
+    ylab(NULL) +
+    theme_minimal() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(size = 10, colour = "black"), 
+          axis.title.x = element_text(size = 9, face = "bold"),
+          plot.title=element_text(face = "bold", hjust = 0.5, vjust = 0))
+ggsave(last_plot(), filename = "gsea_all.pdf", path = "results/single-cell/iPSC-T", width = 6, height = 4)
+
+```
+
+```{r dotplot}
+# assess expression (usually mean) of the gene and the consistency of expression simultaneously
+
+genes <- mapIds(org.Hs.eg.db, keys= c("TNNT2", "TTN", "MYH7", "MYL2", "TNNT1", "WT1", "UPK3B", "ALDH1A2"), column = "ENSEMBL", keytype = "SYMBOL")
+
+# calculate percentage of total cells expressing a gene (raw counts > 0) by metadata groups. 
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        percent = unlist(lapply(genes, calc_helper_perc, object = object))
+        n_exp = unlist(lapply(genes, calc_helper_exp_cells, object = object))
+        n_cluster = unlist(lapply(genes, calc_helper_n_cells, object = object))
+        avg_exp = unlist(lapply(genes, calc_avg_exp, object = object))
+        
+        cat("Lengths of vectors:\n")
+        cat("Percent: ", length(percent), "\n")
+        cat("N_exp: ", length(n_exp), "\n")
+        cat("N_cluster: ", length(n_cluster), "\n")
+        cat("Avg_exp: ", length(avg_exp), "\n")
+
+        result = data.frame(gene = genes, perc_exp_cell = percent, n_exp_cell = n_exp, n_cluster = n_cluster, avg_cluster_exp = avg_exp)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes = genes)
+        for(i in 1:length(factors)){
+        results[[i]]$cluster = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper_perc <- function(object, genes){
+    counts = object[['SCT']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells*100
+    }else{return(NA)}
+}
+
+calc_helper_exp_cells <- function(object, genes){
+    counts = object[['SCT']]@counts
+    if(genes %in% row.names(counts)){
+    sum(counts[genes, ]>0)
+    }else{return(NA)}
+}
+
+calc_helper_n_cells <- function(object, genes){
+    ncol(object[['SCT']]@counts)
+}
+
+calc_avg_exp <- function(object, genes){
+    counts = object[['SCT']]@counts
+    if(genes %in% row.names(counts)){
+      AverageExpression(object[genes,], assays = "SCT", features = genes, slot = "scale.data")
+    }else{return(NA)}
+}
+
+# SCT assay: counts = corrected counts, data = log1p(counts), scale.data = pearson residuals
+df_dotplot <- PrctCellExpringGene(seurat_singlet, genes, "SCT_snn_res.0.01")
+df_dotplot$symbol <- mapIds(org.Hs.eg.db, keys = df_dotplot$gene, column = "SYMBOL", keytype = "ENSEMBL")
+
+df_dotplot %>% 
+    mutate(cluster = fct_relevel(cluster, "0", "1")) %>% 
+    mutate(symbol = fct_relevel(symbol, rev(c("TNNT2", "TTN", "MYH7", "MYL2", "TNNT1", "WT1", "UPK3B", "ALDH1A2")))) %>% 
+    mutate(perc_exp_cell = perc_exp_cell) %>% 
+    group_by(cluster) %>% 
+    #  filter(avg_cluster_exp > 0, perc_exp_cell > 1) %>% 
+    ggplot(aes(x = cluster, y = symbol, fill = avg_cluster_exp, size = perc_exp_cell)) + 
+    geom_point(shape = 21) + 
+    theme_minimal() + 
+    scale_fill_gradient(low = "#E5E5E5", 
+                        high = "#006d77") +
+    scale_size(range = c(2, 8)) +
+    scale_x_discrete(labels = c("0" = "Cardiomyocytes", 
+                                "1" = "Epicardial-derived")) +
+    theme(axis.text.x = element_text(size = 12, face = "bold"), 
+          axis.text.y = element_text(size = 12, face = "bold.italic"),
+          legend.title = element_text(size=9, face = "bold")) +
+    labs(x = '', y = '', fill = "Scaled\nAverage\nExpression", size = "Percentage\nExpressing\nCells (%)")
+ggsave(last_plot(), filename = "dotplot.pdf", path = "results/single-cell/iPSC-T", width = 6, height = 5)
+
+```
+
+```{r cell type annotation - label transfer} 
+
+### Cell type classification using an integrated reference 
+# Seurat projects the PCA structure of the reference dataset onto the query dataset without modifying it
+
+## Cui et al #
+cui <- readRDS("~/Documents/cardio/single_cell_datasets/Cui2019_18FetalHearts_5_25weeks/Cui_processed.rds")
+
+DefaultAssay(seurat_singlet) = "RNA"
+DefaultAssay(cui) <- "RNA"
+
+# identifies shared features between the reference and query datasets
+anchors <- FindTransferAnchors(reference = cui, 
+                               query = seurat_singlet, 
+                               dims = 1:25,
+                               reference.reduction = "pca")
+
+# transfer the cell type labels (or any other metadata) from the reference to the query dataset 
+predictions_cui <- TransferData(anchorset = anchors, 
+                            refdata = cui$cluster, 
+                            dims = 1:25)
+
+# add the Transferred Labels to the Query Dataset
+seurat_singlet <- AddMetaData(seurat_singlet,
+                    metadata = predictions_cui)
+
+table(seurat_singlet$predicted.id)
+# the predicted.id will always be the ID with the highest prediction score for the cell, regardless of how high or low the score may be
+
+# filter cell type assignment according to score
+seurat_singlet$cell_type_cui <- ifelse(seurat_singlet$prediction.score.max > 0.6, seurat_singlet$predicted.id, NA)
+
+# UMAP with Cui cell assignment
+DimPlot(seurat_singlet, 
+        reduction = 'umap', 
+        cols = c("coral1","firebrick", "#9D8BCD"),
+        group.by = "cell_type_cui", 
+        repel = TRUE,
+        label = FALSE) + 
+    guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave(last_plot(), filename = "Cui_predicted_cell_types_UMAP_PC25.pdf", path = "results/single-cell/iPSC-T", width = 6, height = 3.3)
+
+```
+
+```{r cell type assignment}
+
+table(Idents(seurat_singlet))
+prop.table(table(Idents(seurat_singlet)))
+
+seurat_singlet <- RenameIdents(seurat_singlet, setNames(c("Cardiomyocytes (88%)", "Epicardial-derived\nCells (12%)"), levels(seurat_singlet)))
+
+DimPlot(seurat_singlet, 
+        reduction = 'umap', 
+        cols = c("#FF6F61", "#80B1D3"),
+        label = FALSE) + 
+  guides(color = guide_legend(override.aes = list(size=4)))
+ggsave(last_plot(), filename = "UMAP_CM_Epi.pdf", path = "results/single-cell/iPSC-T", width = 6, height = 3)
+
+
+# plot MitoRatio
+FeaturePlot(seurat_singlet, 
+            reduction = "umap", 
+            features = "mitoRatio", 
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE) 
+ggsave(last_plot(), filename = "feature_mitoRatio.pdf", path = "results/single-cell/iPSC-T/", width = 4.5, height = 3)
+
+```
+
+
+###################
+#### iPSC- D ######
+###################
+
+```{r import data}
+
+# file with the gene IDs, representing all genes quantified, listed in the order of the rows in the matrix file
+gene_ids <- read.table("data/single_cell/iPSC-D/count_matrix_gene.genes.txt")$V1
+gene_ids <- gsub("\\..*", "", gene_ids)
+
+# file with the cell IDs, representing all cells quantified, listed in the order of the columns of the matrix file
+cell_ids <- read.table("data/single_cell/iPSC-D/count_matrix_gene.barcodes.txt")$V1
+
+# matrix of counts per gene for every cell
+counts <- Matrix::readMM("data/single_cell/iPSC-D/count_matrix_gene.mtx")
+counts <- t(counts)
+rownames(counts) <- gene_ids
+colnames(counts) <- cell_ids
+dim(counts)
+
+```
+
+```{r remove empty droplets}
+library("DropletUtils")
+
+### Detect empty droplets ####
+
+# distinguish between cells and empty droplets (eg: droplets that contain RNA from the ambient solution, resulting in non-zero counts after debarcoding)
+set.seed(100)
+empty_drops <- emptyDrops(counts)  # test each barcode’s expression profile for significant deviation from the ambient profile
+
+# filter cell-containing droplets (those with significant deviations from the ambient profile)
+is.cell <- empty_drops$FDR <= 0.01  # frequency of false positives is specified by FDR
+summary(is.cell, na.rm = TRUE)
+
+# check whether a lower p-value could be obtained by increasing the number of permutations (Limited field). 
+# if FDR > 0.01 and Limited==TRUE, npts should be increased 
+table(Limited = empty_drops$Limited, Significant = is.cell)
+
+# diagnostic plot - total counts vs negative log-probability
+# droplets detected as cells show up with large negative log-probabilities OR very large total counts
+plot(empty_drops$Total, 
+     -empty_drops$LogProb, 
+     col=ifelse(is.cell, "red", "black"),
+     xlab = "Total UMI count",
+     ylab = "-Log Probability")
+
+# subset matrix to cell-containing droplets only
+counts <- counts[, which(is.cell), drop = FALSE]
+dim(counts)
+
+```
+
+```{r create Seurat object & metadata}
+library("Seurat")
+
+assay <- Seurat::CreateAssayObject(counts, assay = "RNA", min.features = 0, min.cells = 0)
+options(Seurat.object.assay.calcn = TRUE) 
+seurat <- Seurat::CreateSeuratObject(assay)
+view(seurat@meta.data)
+  # nCount_RNA - number of UMIs per cell
+  # nFeature_RNA - number of genes detected per cell
+
+# add number of genes per UMI for each cell to the metadata
+# inform on complexity of the dataset (the more genes detected per UMI, the more complex data is)
+seurat$log10GenesPerUMI <- log10(seurat$nFeature_RNA) / log10(seurat$nCount_RNA)
+
+# add percentage of mitochondrial ratio to the metadata
+mito_genes <- read.table("data/single_cell/mito_genes.txt", header = T) %>% pull("gene_id")
+seurat$mitoRatio <- Seurat::PercentageFeatureSet(object = seurat, features = mito_genes) / 100
+
+# add percentage of ribosomal ratio to the metadata
+ribo_genes <- read.table("data/single_cell/ribo_genes.txt", header = T) %>% pull("gene_id")
+ribo_genes <- ribo_genes[ribo_genes %in% rownames(Seurat::GetAssayData(seurat))]
+seurat$riboRatio <- Seurat::PercentageFeatureSet(object = seurat, features = ribo_genes) / 100
+
+# add column with cell ids
+seurat@meta.data$cells <- rownames(seurat@meta.data)
+  view(seurat@meta.data)
+
+```
+
+```{r quality control}
+
+# number of cells counts per sample
+seurat@meta.data %>% 
+  ggplot(aes(x = orig.ident, fill = orig.ident)) + 
+  geom_bar() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), axis.title.x = element_blank(), legend.position = "none") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  ggtitle("NCells")
+ggsave(last_plot(), filename = "QC_number_counts.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 7)
+
+# number UMIs (transcripts) per cell
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = nCount_RNA, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() + 
+  ylab("Cell density") + 
+  geom_vline(xintercept = 1000) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_number_UMI_cell.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+
+# distribution of genes detected per cell 
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = nFeature_RNA, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_distribution_genes_cell.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+
+# distribution of mitochondrial gene expression detected per cell
+# 30% of total mRNA in the heart is mitochondrial due to high energy needs of cardiomyocytes
+seurat@meta.data %>% 
+  ggplot(aes(colour = orig.ident, x = mitoRatio, fill = orig.ident)) +  
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 0.4) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_distribution_mito_cell.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+
+# genes detected vs number of UMIs + mitoRatio
+seurat@meta.data %>% 
+  ggplot(aes(x = nCount_RNA, y = nFeature_RNA, colour = mitoRatio)) + 
+  geom_point() + 
+  scale_colour_gradient(low = "gray90", high = "black") + 
+  stat_smooth(method = lm) + 
+  scale_x_log10() + 
+  scale_y_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 700) + 
+  geom_hline(yintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_genes_UMI_mito.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+
+# complexity of the gene expression (genes detected per UMI)
+seurat@meta.data %>% 
+  ggplot(aes(x = log10GenesPerUMI, colour = orig.ident, fill = orig.ident)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() + 
+  geom_vline(xintercept = 0.8) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_complexity.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+
+# values overall are distributed in the data
+Seurat::VlnPlot(object = seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoRatio", "riboRatio"), ncol = 4)
+ggsave(last_plot(), filename = "QC_overall.pdf", path = "results/single-cell/iPSC-D", width = 7, height = 5)
+
+```
+
+```{r filtering}
+
+### cell-level filtering ##
+  
+# filter low quality reads
+filtered_seurat <- subset(x = seurat, subset = nCount_RNA >= 1000 & nFeature_RNA >= 500 & log10GenesPerUMI > 0.80 & mitoRatio < 0.4 & riboRatio > 0.05)
+  
+filtered_seurat@meta.data %>% 
+  ggplot(aes(x=nCount_RNA, y=nFeature_RNA, color=mitoRatio)) + 
+  geom_point() + 
+  scale_colour_gradient(low = "gray90", high = "black") + 
+  stat_smooth(method=lm) + 
+  scale_x_log10() + 
+  scale_y_log10() + 
+  theme_classic() + 
+  geom_vline(xintercept = 700) + 
+  geom_hline(yintercept = 500) + 
+  theme(legend.position = "none")
+ggsave(last_plot(), filename = "QC_genes_UMI_mito_filtered.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3)
+  
+Seurat::VlnPlot(object = filtered_seurat, features = c("nFeature_RNA", "nCount_RNA", "mitoRatio", "riboRatio"), ncol = 4)
+ggsave(last_plot(), filename = "QC_overall_filtered.pdf", path = "results/single-cell/iPSC-D", width = 7, height = 5)
+
+
+### gene-level filtering ##
+  
+# remove genes that have 0 expression in all cells
+filtered_counts <- Seurat::GetAssayData(object = filtered_seurat, slot = "counts")
+nonzero <- filtered_counts > 0
+
+# keep only those genes expressed in more than 10 cells
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+filtered_counts <- filtered_counts[keep_genes, ]
+  
+# keep only protein-coding genes
+# protein_coding_id <- read.table("data/protein_coding_genes_id.txt")$V1
+# protein_coding <- rownames(filtered_counts) %in% protein_coding_id
+# filtered_counts <- filtered_counts[protein_coding, ]
+
+write.table(filtered_counts, "results/single-cell/iPSC-D/filtered_counts.tsv", quote = F, sep = "\t", row.names = T)
+  
+# subset seurat object to filtered cells and genes
+filtered_seurat <- filtered_seurat[rownames(filtered_seurat) %in% rownames(filtered_counts),]
+
+# check cell cycle for unwanted sources of variation 
+load("data/single_cell/cell_cycle.rda")
+filtered_seurat <- Seurat::CellCycleScoring(filtered_seurat, 
+                                            g2m.features = mapIds(org.Hs.eg.db, keys=g2m_genes, column="ENSEMBL", keytype="SYMBOL"), 
+                                            s.features = mapIds(org.Hs.eg.db, keys=s_genes, column="ENSEMBL", keytype="SYMBOL"))
+view(filtered_seurat@meta.data)
+
+# number of cells in each cell cycle phase 
+as_tibble(filtered_seurat[[]]) %>% ggplot(aes(Phase)) + geom_bar()
+ggsave(last_plot(), filename = "QC_cell_cycle_phase.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 5)
+
+```
+
+```{r normalization, scaling & identification of highly variable genes}
+
+# normalizes the gene expression count for each cell to the total expression, multiplies this by a scale factor
+filtered_seurat <- NormalizeData(object = filtered_seurat, 
+                                 normalization.method = "LogNormalize", 
+                                 scale.factor = 10000)
+
+# calculates the standardized variance of each gene across cells, and picks the top ones
+filtered_seurat <- FindVariableFeatures(object = filtered_seurat, 
+                                        selection.method = "vst", 
+                                        nfeatures = 1000, 
+                                        assay = "RNA")
+
+# scaling gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+filtered_seurat <- ScaleData(filtered_seurat, 
+                             features = VariableFeatures(object = filtered_seurat), 
+                             vars.to.regress = c("nCount_RNA"), # # regresses out unwanted sources of variation 
+                             do.center = T, # shifts the expression of each gene, so that the mean expression across cells is 0 - requirement for PCA
+                             do.scale = T, # scale the expression of each gene, so that the variance across cells is 1
+                             verbose = F)
+  # fits a linear regression model, using the normalized expression level of a gene as the dependent variable, and the variables to be regressed out as the independent variables. residuals of the linear model are then taken as the signals with the linear effect of the considered variables removed
+
+# SCTransform combines normalization, scaling and highly variable feature identification
+# regularized negative binomial regression model to remove the variation due to sequencing depth (nUMIs per cell), while adjusting the variance based on pooling information across genes with similar abundances (log-normalization introduces zero-inflation artifact)
+filtered_seurat <- SCTransform(filtered_seurat, 
+                               do.correct.umi = T, 
+                               vars.to.regress = c("nCount_RNA"),
+                               verbose = F, 
+                               variable.features.rv.th = NULL, 
+                               variable.features.n = 1000, 
+                               seed.use = 1, 
+                               do.scale = FALSE, 
+                               do.center = TRUE)
+# SCT assay: counts = corrected counts, data = log1p(counts), scale.data = pearson residuals
+DefaultAssay(filtered_seurat) = "SCT"
+
+# compare the intersection of highly variable genes given by RNA and SCT 
+length(intersect(VariableFeatures(filtered_seurat, assay = "RNA"), VariableFeatures(filtered_seurat, assay = "SCT")))
+
+```
+
+```{r linear dimensionality reduction}
+
+### PCA ###
+filtered_seurat <- RunPCA(filtered_seurat, 
+                          features = VariableFeatures(object = filtered_seurat), 
+                          seed.use = 12345,
+                          npcs = 50)
+
+DimPlot(filtered_seurat, 
+        reduction = "pca")
+ggsave(last_plot(), filename = "pca.pdf", path = "results/single-cell/iPSC-D/", width = 6, height = 5) 
+
+# gene contributions of each PC 
+PCHeatmap(filtered_seurat, 
+            dims = 1:20, 
+            cells = 500, 
+            balanced = TRUE, 
+            ncol = 3)
+  
+# plot the standard deviations of the principle components - higher-ranked PCs explain more variation in the data 
+# picking the elbow of the curve helps determining the number of PCs to use 
+ElbowPlot(object = filtered_seurat,
+          reduction = "pca") +
+    ggtitle("Number of principle component") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r non-linear dimensionality reduction}
+
+### t-SNE
+filtered_seurat <- RunTSNE(filtered_seurat, 
+                           perplexity = 70, 
+                           dims = 1:5,
+                           seed.use = 12345)
+
+DimPlot(filtered_seurat, 
+        reduction = "tsne")
+ggsave(last_plot(), filename = "tsne.pdf", path = "results/single-cell/iPSC-D/", width = 7, height = 5) 
+
+
+### UMAP
+# distances between cells represent similarity in expression
+# preserves trajectory-like structure better when data contains 'continuum', e.g. the continuous cell state change during development and differentiation 
+filtered_seurat <- RunUMAP(filtered_seurat, 
+                           assay = "SCT", 
+                           dims = 1:5,
+                           seed.use = 12345)
+
+DimPlot(filtered_seurat, 
+        reduction = "umap")
+ggsave(last_plot(), filename = "umap.pdf", path = "results/single-cell/iPSC-D/", width = 7, height = 4) 
+
+
+# plot metrics
+FeaturePlot(filtered_seurat, 
+            reduction = "umap", 
+            features = c("nCount_RNA", "nFeature_RNA", "S.Score", "G2M.Score", "mitoRatio", "riboRatio"),
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE)
+ggsave(last_plot(), filename = "feature_metrics.pdf", path = "results/single-cell/iPSC-D/", width = 6.4, height = 5.7)
+
+# plot MitoRatio
+FeaturePlot(filtered_seurat, 
+            reduction = "umap", 
+            features = "mitoRatio", 
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE) 
+ggsave(last_plot(), filename = "feature_mitoRatio.pdf", path = "results/single-cell/iPSC-D/", width = 4.5, height = 3)
+
+```
+
+```{r clustering}
+
+# Constructs Shared Nearest-Neighbor (SNN) Graph Construction 
+filtered_seurat <- FindNeighbors(filtered_seurat, 
+                                 reduction = "pca", 
+                                 dims = 1:5, 
+                                 verbose = F)
+
+filtered_seurat <- FindClusters(filtered_seurat, 
+                                resolution = c(0.01, 0.05, 0.1, 0.15, 0.2, 0.25), 
+                                algorithm = 2)
+
+# UMAP resolution 0.1
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.1"
+DimPlot(filtered_seurat, 
+        reduction = 'umap', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "umap_resolution_01.pdf", path = "results/single-cell/iPSC-D/", width = 5, height = 3.3)
+
+# tSNE resolution 0.1
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.1"
+DimPlot(filtered_seurat, 
+        reduction = 'tsne', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "tsne_resolution_01.pdf", path = "results/single-cell/iPSC-D/", width = 5, height = 3.3)
+
+# UMAP resolution 0.01
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.05"
+DimPlot(filtered_seurat, 
+        reduction = 'umap', 
+        cols = c("#FF6F61", "#80B1D3"))
+ggsave(last_plot(), filename = "umap_resolution_005.pdf", path = "results/single-cell/iPSC-D/", width = 5, height = 3.3)
+
+# tSNE resolution 0.01
+Idents(object = filtered_seurat) <- "SCT_snn_res.0.05"
+DimPlot(filtered_seurat, 
+        reduction = 'tsne', 
+        cols = c("#FF6F61","#9D8BCD", "#00BFC4", "#E8B349"))
+ggsave(last_plot(), filename = "tsne_resolution_005.pdf", path = "results/single-cell/iPSC-D/", width = 5, height = 3.3)
+
+# number of cells in each cluster
+table(Idents(filtered_seurat))
+
+# proportion of cells in each cluster
+prop.table(table(Idents(filtered_seurat)))
+
+# extract cell ids of a particular cluster
+cells_cluster0 = WhichCells(filtered_seurat, idents = 0)
+cells_cluster1 = WhichCells(filtered_seurat, idents = 1)
+
+saveRDS(filtered_seurat, "results/single-cell/iPSC-D/filtered_seurat.rds")
+
+```
+
+```{r doublet detection}
+
+# seurat_doublet <- readRDS("results/single-cell/iPSC-D/filtered_seurat.rds") # fully processed seurat object (i.e., after NormalizeData, FindVariableGenes, ScaleData, RunPCA, and RunTSNE have all been run)
+
+library("DoubletFinder")
+options(future.globals.maxSize = 4000 * 1024^2)
+
+# predicts doublets according to each real cell’s proximity in gene expression space to artificial doublets created by averaging the transcriptional profile of randomly chosen cell pairs 
+# 3 - perform PCA and use the PC distance matrix to find each cell's proportion of artificial k nearest neighbors (pANN)
+
+## Parameter selection ####
+# Performs pN-pK parameter sweeps 
+# cell's proportion of artificial k nearest neighbors (pANN) values are computed across variable PC space neighborhood sizes (pK)
+sweep.res.list <- paramSweep(filtered_seurat, 
+                             PCs = 1:5, 
+                             sct = TRUE)    # used SCT transformation during processing
+
+# Summarizes results fromParamSweep, computing the bimodality coefficient across pN and pK parameter space
+sweep.stats <- summarizeSweep(sweep.res.list,
+                              GT = FALSE) # ground truth
+
+# Optimal pK is the max of the bimodality coefficent (BCmvn) distribution 
+ggplot(bcmvn, aes(pK, BCmetric, group = 1)) +
+    geom_point() +
+    geom_line() +
+    theme_minimal() 
+# 0.05
+
+## Homotypic Doublet Classification ####
+
+# Leverages user-provided cell annotations to model the proportion of homotypic doublets
+homotypic.prop <- modelHomotypic(filtered_seurat@meta.data$SCT_snn_res.0.05)
+nExp_poi <- round(0.05 * nrow(filtered_seurat@meta.data))  ## Assuming 5% doublet formation rate
+# ~4300 recovered (after filtering)
+nExp_poi.adj <- round(nExp_poi*(1 - homotypic.prop)) # adjusted the expected doublet number to account for homotypic doublets
+
+## Run DoubletFinder with varying stringencies ####
+seurat_doublet <- doubletFinder(filtered_seurat,
+                                PCs = 1:5, # number of statistically significant PCs
+                                pN = 0.25, # number of generated artificial doublets, expressed as a proportion of the merged real-artificial data
+                                pK = 0.05, # PC neighborhood size used to compute pANN (predicted doublets), expressed as a proportion of the merged real-artificial data
+                                nExp = nExp_poi.adj, # pANN threshold used to make final doublet/singlet predictions
+                                reuse.pANN = FALSE, 
+                                sct = TRUE)                               
+
+# visualize doublets
+DimPlot(seurat_doublet, reduction = 'umap', group.by = "DF.classifications_0.25_0.05_49") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+ggsave(last_plot(), filename = "seurat_doublets_res005_pK005.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3.3)
+
+# Rename column
+colnames(seurat_doublet@meta.data)[grepl("DF.classifications_0.25_0.05_49", colnames(seurat_doublet@meta.data))] <- "DoubletFinder"
+
+# Subset only singlets
+seurat_singlet <- subset(seurat_doublet, subset = DoubletFinder == "Singlet")
+DimPlot(seurat_singlet, reduction = "umap", cols = c("#FF6F61", "#80B1D3"))
+ggsave(last_plot(), filename = "umap_seurat_singlets.pdf", path = "results/single-cell/iPSC-D", width = 5, height = 3.3)
+
+#save object
+saveRDS(seurat_doublet, file = "results/single-cell/iPSC-D/filtered_seurat_doublet.rds")
+saveRDS(seurat_singlet, file = "results/single-cell/iPSC-D/filtered_seurat_singlet.rds")
+
+```
+
+```{r cluster biomarkers}
+
+annotations <- read.csv("data/single_cell/annotation.txt")
+
+markers <- FindAllMarkers(object = seurat_singlet, 
+                          min.pct = 0.25, 
+                          only.pos = T, 
+                          logfc.threshold = 0.5)
+# min.pct: only test genes that are detected in a minimum fraction of cells in either of the two populations.
+# logfc.threshold: minimum log2 foldchange for average expression of gene in cluster relative to the average expression in all other clusters combined
+
+markers <- markers %>% 
+  mutate(gene_name = mapIds(org.Hs.eg.db, keys = markers$gene, column = "SYMBOL", keytype = "ENSEMBL"),
+         left_join(., unique(annotations[, c("gene_id", "description")]), by = c("gene" = "gene_id"))) %>% 
+  group_by(cluster) %>% 
+  arrange(cluster, desc(avg_log2FC))
+
+# write.table(markers, "results/single-cell/iPSC-D/markers_clusters.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+markers_top <- markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)    
+
+DoHeatmap(object = seurat_singlet, features = markers_top$gene, label = TRUE) + scale_fill_viridis()
+ggsave(last_plot(), filename = "markers_heatmap.png", path = "results/single-cell/iPSC-D", width = 15, height = 8)
+
+```
+
+```{r enriched pathways}
+library("clusterProfiler")
+
+swr = function(string, nwrap=20) {
+  paste(strwrap(string, width=nwrap), collapse="\n")
+}
+swr = Vectorize(swr)
+
+## GSEA analysis
+geneList = markers %>% filter(cluster == "0" & p_val_adj <= 0.01) %>% pull(avg_log2FC)
+names(geneList) = as.character(markers %>% filter(cluster == "0" & p_val_adj <= 0.01) %>% pull(gene))
+geneList = sort(geneList, decreasing = TRUE)
+gsea_cluster0 <- gseGO(gene = geneList,
+                       keyType = "ENSEMBL", 
+                       OrgDb = org.Hs.eg.db, 
+                       ont = "BP",
+                       scoreType = "pos") %>% as.data.frame() %>% 
+  arrange(p.adjust) %>% 
+  mutate(cluster = 0)
+write.table(gsea_cluster0, "results/single-cell/iPSC-D/gsea_cluster0_CM.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+geneList = markers %>% filter(cluster == "1" & p_val_adj <= 0.01) %>% pull(avg_log2FC)
+names(geneList) = as.character(markers %>% filter(cluster == "1" & p_val_adj <= 0.01) %>% pull(gene))
+geneList = sort(geneList, decreasing = TRUE)
+gsea_cluster1 <- gseGO(gene = geneList,
+                       keyType = "ENSEMBL", 
+                       OrgDb = org.Hs.eg.db, 
+                       ont = "BP",
+                       scoreType = "pos") %>% as.data.frame() %>% 
+  arrange(p.adjust) %>% 
+  mutate(cluster = 1)
+write.table(gsea_cluster1, "results/single-cell/iPSC-D/gsea_cluster1_Epi.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+
+gsea <- rbind(head(gsea_cluster0, 5), head(gsea_cluster1, 5)) %>% 
+  dplyr::select(Description, p.adjust, cluster, NES, enrichmentScore) %>% 
+  mutate(cluster = as.character(cluster),
+         Description = factor(Description, levels=rev(unique(Description[order(cluster, p.adjust)])), ordered=TRUE))
+write.table(gsea_cluster1, "results/single-cell/iPSC-D/gsea_all.csv", row.names = FALSE, quote = FALSE, sep = ",")
+
+ggplot(gsea, aes(x = -log10(p.adjust), y = Description, fill = cluster)) + 
+    geom_bar(stat = "identity",  position = "dodge")  +
+    scale_fill_manual(values = c("#FF6F61", "#80B1D3")) +
+    xlab("-log10 adjusted p-value") +
+    ylab(NULL) +
+    theme_minimal() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(size = 10, colour = "black"), 
+          axis.title.x = element_text(size = 9, face = "bold"),
+          plot.title=element_text(face = "bold", hjust = 0.5, vjust = 0))
+ggsave(last_plot(), filename = "gsea_all.pdf", path = "results/single-cell/iPSC-D", width = 7, height = 4)
+
+```
+
+```{r dotplot}
+# assess expression (usually mean) of the gene and the consistency of expression simultaneously
+
+genes <- mapIds(org.Hs.eg.db, keys= c("TNNT2", "TTN", "MYH7", "MYL2", "TNNT1", "WT1", "UPK3B", "ALDH1A2"), column = "ENSEMBL", keytype = "SYMBOL")
+
+# calculate percentage of total cells expressing a gene (raw counts > 0) by metadata groups. 
+PrctCellExpringGene <- function(object, genes, group.by = "all"){
+    if(group.by == "all"){
+        percent = unlist(lapply(genes, calc_helper_perc, object = object))
+        n_exp = unlist(lapply(genes, calc_helper_exp_cells, object = object))
+        n_cluster = unlist(lapply(genes, calc_helper_n_cells, object = object))
+        avg_exp = unlist(lapply(genes, calc_avg_exp, object = object))
+        
+        cat("Lengths of vectors:\n")
+        cat("Percent: ", length(percent), "\n")
+        cat("N_exp: ", length(n_exp), "\n")
+        cat("N_cluster: ", length(n_cluster), "\n")
+        cat("Avg_exp: ", length(avg_exp), "\n")
+
+        result = data.frame(gene = genes, perc_exp_cell = percent, n_exp_cell = n_exp, n_cluster = n_cluster, avg_cluster_exp = avg_exp)
+        return(result)
+    }
+
+    else{        
+        list = SplitObject(object, group.by)
+        factors = names(list)
+
+        results = lapply(list, PrctCellExpringGene, genes = genes)
+        for(i in 1:length(factors)){
+        results[[i]]$cluster = factors[i]
+        }
+        combined = do.call("rbind", results)
+        return(combined)
+    }
+}
+
+calc_helper_perc <- function(object, genes){
+    counts = object[['SCT']]@counts
+    ncells = ncol(counts)
+    if(genes %in% row.names(counts)){
+    sum(counts[genes,]>0)/ncells*100
+    }else{return(NA)}
+}
+
+calc_helper_exp_cells <- function(object, genes){
+    counts = object[['SCT']]@counts
+    if(genes %in% row.names(counts)){
+    sum(counts[genes, ]>0)
+    }else{return(NA)}
+}
+
+calc_helper_n_cells <- function(object, genes){
+    ncol(object[['SCT']]@counts)
+}
+
+calc_avg_exp <- function(object, genes){
+    counts = object[['SCT']]@counts
+    if(genes %in% row.names(counts)){
+      AverageExpression(object[genes,], assays = "SCT", features = genes, slot = "scale.data")
+    }else{return(NA)}
+}
+
+# SCT assay: counts = corrected counts, data = log1p(counts), scale.data = pearson residuals
+df_dotplot <- PrctCellExpringGene(seurat_singlet, genes, "SCT_snn_res.0.05")
+df_dotplot$symbol <- mapIds(org.Hs.eg.db, keys = df_dotplot$gene, column = "SYMBOL", keytype = "ENSEMBL")
+
+df_dotplot %>% 
+    mutate(cluster = fct_relevel(cluster, "0", "1")) %>% 
+    mutate(symbol = fct_relevel(symbol, rev(c("TNNT2", "TTN", "MYH7", "MYL2", "TNNT1", "WT1", "UPK3B", "ALDH1A2")))) %>% 
+    mutate(perc_exp_cell = perc_exp_cell) %>% 
+    group_by(cluster) %>% 
+    #  filter(avg_cluster_exp > 0, perc_exp_cell > 1) %>% 
+    ggplot(aes(x = cluster, y = symbol, fill = avg_cluster_exp, size = perc_exp_cell)) + 
+    geom_point(shape = 21) + 
+    theme_minimal() + 
+    scale_fill_gradient(low = "#E5E5E5", 
+                        high = "#006d77") +
+    scale_size(range = c(2, 8)) +
+    scale_x_discrete(labels = c("0" = "Cardiomyocytes", 
+                                "1" = "Epicardial-derived")) +
+    theme(axis.text.x = element_text(size = 12, face = "bold"), 
+          axis.text.y = element_text(size = 12, face = "bold.italic"),
+          legend.title = element_text(size=9, face = "bold")) +
+    labs(x = '', y = '', fill = "Scaled\nAverage\nExpression", size = "Percentage\nExpressing\nCells (%)")
+ggsave(last_plot(), filename = "dotplot.pdf", path = "results/single-cell/iPSC-D", width = 6, height = 5)
+
+```
+
+```{r cell type annotation - label transfer} 
+
+### Cell type classification using an integrated reference ####
+
+# Seurat projects the PCA structure of the reference dataset onto the query dataset without modifying it
+
+## Cui ####
+cui <- readRDS("~/Documents/cardio/single_cell_datasets/Cui2019_18FetalHearts_5_25weeks/Cui_processed.rds")
+
+DefaultAssay(seurat_singlet) = "RNA"
+DefaultAssay(cui) <- "RNA"
+
+# identifies shared features between the reference and query datasets
+anchors <- FindTransferAnchors(reference = cui, 
+                               query = seurat_singlet, 
+                               dims = 1:25,
+                               reference.reduction = "pca")
+
+# transfer the cell type labels (or any other metadata) from the reference to the query dataset 
+predictions_cui <- TransferData(anchorset = anchors, 
+                            refdata = cui$cluster, 
+                            dims = 1:25)
+
+# add the Transferred Labels to the Query Dataset
+seurat_singlet <- AddMetaData(seurat_singlet,
+                    metadata = predictions_cui)
+
+table(seurat_singlet$predicted.id)
+# the predicted.id will always be the ID with the highest prediction score for the cell, regardless of how high or low the score may be
+
+# filter cell type assignment according to score
+seurat_singlet$cell_type_cui <- ifelse(seurat_singlet$prediction.score.max > 0.6, seurat_singlet$predicted.id, NA)
+
+# UMAP with Cui cell assignment
+DimPlot(seurat_singlet, 
+        reduction = 'umap', 
+        cols = c("coral1","firebrick", "#9D8BCD"),
+        group.by = "cell_type_cui", 
+        repel = TRUE,
+        label = FALSE) + 
+    guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave(last_plot(), filename = "Cui_predicted_cell_types_UMAP_PC25.pdf", path = "results/single-cell/iPSC-D", width = 6, height = 3.3)
+
+```
+
+```{r cell type assignment}
+
+table(Idents(seurat_singlet))
+prop.table(table(Idents(seurat_singlet)))
+
+seurat_singlet <- RenameIdents(seurat_singlet, setNames(c("Cardiomyocytes (84%)", "Epicardial-derived\nCells (16%)"), levels(seurat_singlet)))
+
+DimPlot(seurat_singlet, 
+        reduction = 'umap', 
+        cols = c("#FF6F61", "#80B1D3"),
+        label = FALSE) + 
+  guides(color = guide_legend(override.aes = list(size=4)))
+ggsave(last_plot(), filename = "UMAP_CM_Epi.pdf", path = "results/single-cell/iPSC-D", width = 6, height = 3)
+
+
+# plot MitoRatio
+FeaturePlot(seurat_singlet, 
+            reduction = "umap", 
+            features = "mitoRatio", 
+            pt.size = 0.4, 
+            min.cutoff = 'q10', 
+            max.cutoff= 'q90', 
+            label = FALSE) 
+ggsave(last_plot(), filename = "feature_mitoRatio.pdf", path = "results/single-cell/iPSC-D/", width = 4.5, height = 3)
+
+```
